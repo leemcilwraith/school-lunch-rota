@@ -4,6 +4,31 @@ import { useMemo, useState } from "react";
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"] as const;
 type DayName = (typeof DAYS)[number];
+type ColumnKey = "hall" | "ks1" | "ks2" | "break";
+
+type StaffMember = {
+  name: string;
+  availableStart?: number;
+  availableEnd?: number;
+};
+
+type SlotAssignment = {
+  hall: string[];
+  ks1: string[];
+  ks2: string[];
+  break: string[];
+};
+
+type DayPlan = {
+  rows: SlotAssignment[];
+  absent: string[];
+  warning: string | null;
+};
+
+type SegmentCell = {
+  names: string[];
+  rowSpan: number;
+} | null;
 
 const SESSION_COUNTS = {
   hall: 3,
@@ -11,20 +36,32 @@ const SESSION_COUNTS = {
   ks2: 3,
 };
 
+const DUTY_WINDOWS = {
+  hall: { start: 11 * 60 + 55, end: 12 * 60 + 45 },
+  ks1: { start: 12 * 60 + 10, end: 13 * 60 },
+  ks2: { start: 12 * 60 + 15, end: 13 * 60 },
+};
+
 const SLOT_START = 11 * 60 + 25;
 const SLOT_END = 13 * 60 + 30;
 const SLOT_STEP = 5;
 
-type DayPlan = {
-  hall: string[];
-  ks1: string[];
-  ks2: string[];
-  earlyBreak: string[];
-  lateBreak: string[];
-  unassigned: string[];
-  absent: string[];
-  warning: string | null;
-};
+const DEFAULT_STAFF: StaffMember[] = [
+  { name: "Paul", availableStart: 11 * 60 + 55, availableEnd: 12 * 60 + 45 },
+  { name: "Niki", availableStart: 11 * 60 + 55, availableEnd: 12 * 60 + 45 },
+  { name: "Sharon", availableStart: 12 * 60, availableEnd: 12 * 60 + 45 },
+  { name: "Bryan", availableStart: 12 * 60 + 15, availableEnd: 13 * 60 },
+  { name: "Drissia", availableStart: 12 * 60 + 15, availableEnd: 13 * 60 },
+  { name: "Rhea", availableStart: 12 * 60 + 15, availableEnd: 13 * 60 },
+  { name: "Jamie", availableStart: 12 * 60 + 15, availableEnd: 13 * 60 },
+  { name: "Hayley", availableStart: 12 * 60 + 15, availableEnd: 13 * 60 },
+  { name: "Holly", availableStart: 12 * 60 + 15, availableEnd: 13 * 60 },
+  { name: "Amy", availableStart: 12 * 60 + 15, availableEnd: 13 * 60 },
+  { name: "Caroline", availableStart: 12 * 60, availableEnd: 12 * 60 + 45 },
+  { name: "Naomi", availableStart: 12 * 60, availableEnd: 12 * 60 + 45 },
+  { name: "Hannah" },
+  { name: "Nick" },
+];
 
 function formatTime(totalMinutes: number) {
   const hours = Math.floor(totalMinutes / 60);
@@ -72,10 +109,6 @@ function buildTimeRows() {
 
 const TIME_ROWS = buildTimeRows();
 
-function isActive(start: number, rowStart: number, rowEnd: number, end: number) {
-  return rowStart >= start && rowEnd <= end;
-}
-
 function buildInitialAbsenceState(): Record<DayName, string[]> {
   return {
     Monday: [],
@@ -86,23 +119,47 @@ function buildInitialAbsenceState(): Record<DayName, string[]> {
   };
 }
 
+function availabilityLabel(member: StaffMember) {
+  if (member.availableStart === undefined || member.availableEnd === undefined) {
+    return "Available all lunch";
+  }
+  return `${formatTime(member.availableStart)}–${formatTime(member.availableEnd)}`;
+}
+
+function isStaffAvailableForSlot(member: StaffMember, rowStart: number, rowEnd: number) {
+  const startOk = member.availableStart === undefined || member.availableStart <= rowStart;
+  const endOk = member.availableEnd === undefined || member.availableEnd >= rowEnd;
+  return startOk && endOk;
+}
+
+function isDutyActive(column: Exclude<ColumnKey, "break">, rowStart: number, rowEnd: number) {
+  return rowStart >= DUTY_WINDOWS[column].start && rowEnd <= DUTY_WINDOWS[column].end;
+}
+
+function buildSegments(rows: SlotAssignment[], column: ColumnKey): SegmentCell[] {
+  const segments: SegmentCell[] = new Array(rows.length).fill(null);
+  let index = 0;
+
+  while (index < rows.length) {
+    const names = rows[index][column];
+    let span = 1;
+
+    while (
+      index + span < rows.length &&
+      rows[index + span][column].join("|") === names.join("|")
+    ) {
+      span += 1;
+    }
+
+    segments[index] = { names, rowSpan: span };
+    index += span;
+  }
+
+  return segments;
+}
+
 export default function Home() {
-  const [staff, setStaff] = useState<string[]>([
-    "Alice",
-    "Ben",
-    "Chloe",
-    "Dan",
-    "Ella",
-    "Freddie",
-    "Grace",
-    "Harry",
-    "Isla",
-    "Jack",
-    "Katie",
-    "Leo",
-    "Mia",
-    "Noah",
-  ]);
+  const [staff, setStaff] = useState<StaffMember[]>(DEFAULT_STAFF);
   const [input, setInput] = useState("");
   const [weekCommencing, setWeekCommencing] = useState("2026-03-23");
   const [selectedDay, setSelectedDay] = useState<DayName>("Monday");
@@ -111,20 +168,20 @@ export default function Home() {
   const addStaff = () => {
     const trimmed = input.trim();
     if (!trimmed) return;
-    if (staff.includes(trimmed)) {
+    if (staff.some((member) => member.name === trimmed)) {
       setInput("");
       return;
     }
-    setStaff([...staff, trimmed]);
+    setStaff([...staff, { name: trimmed }]);
     setInput("");
   };
 
   const removeStaff = (name: string) => {
-    setStaff((prev) => prev.filter((s) => s !== name));
+    setStaff((prev) => prev.filter((member) => member.name !== name));
     setAbsentByDay((prev) => {
       const next = { ...prev };
       DAYS.forEach((day) => {
-        next[day] = next[day].filter((s) => s !== name);
+        next[day] = next[day].filter((staffName) => staffName !== name);
       });
       return next;
     });
@@ -133,10 +190,11 @@ export default function Home() {
   const toggleAbsent = (day: DayName, name: string) => {
     setAbsentByDay((prev) => {
       const current = prev[day];
-      const exists = current.includes(name);
       return {
         ...prev,
-        [day]: exists ? current.filter((n) => n !== name) : [...current, name],
+        [day]: current.includes(name)
+          ? current.filter((staffName) => staffName !== name)
+          : [...current, name],
       };
     });
   };
@@ -146,97 +204,125 @@ export default function Home() {
 
     DAYS.forEach((day, dayIndex) => {
       const absent = absentByDay[day] || [];
-      const availableStaff = staff.filter((name) => !absent.includes(name));
-      const totalStaff = availableStaff.length;
-
-      if (totalStaff === 0) {
-        result[day] = {
-          hall: [],
-          ks1: [],
-          ks2: [],
-          earlyBreak: [],
-          lateBreak: [],
-          unassigned: [],
-          absent,
-          warning: "No staff available for this day.",
-        };
-        return;
-      }
-
-      const rotationIndex = (dayIndex * 3) % totalStaff;
-      const rotated = [
-        ...availableStaff.slice(rotationIndex),
-        ...availableStaff.slice(0, rotationIndex),
+      const availableMembers = staff.filter((member) => !absent.includes(member.name));
+      const rows: SlotAssignment[] = [];
+      const loadCount = Object.fromEntries(availableMembers.map((member) => [member.name, 0]));
+      const previousLocation = Object.fromEntries(availableMembers.map((member) => [member.name, null as ColumnKey | null]));
+      const rotationIndex = availableMembers.length ? (dayIndex * 2) % availableMembers.length : 0;
+      const rotatedNames = [
+        ...availableMembers.slice(rotationIndex).map((member) => member.name),
+        ...availableMembers.slice(0, rotationIndex).map((member) => member.name),
       ];
+      const orderIndex = Object.fromEntries(rotatedNames.map((name, index) => [name, index]));
 
-      const hall = rotated.slice(0, SESSION_COUNTS.hall);
-      const ks1 = rotated.slice(
-        SESSION_COUNTS.hall,
-        SESSION_COUNTS.hall + SESSION_COUNTS.ks1
-      );
-      const ks2 = rotated.slice(
-        SESSION_COUNTS.hall + SESSION_COUNTS.ks1,
-        SESSION_COUNTS.hall + SESSION_COUNTS.ks1 + SESSION_COUNTS.ks2
-      );
-      const unassigned = rotated.slice(
-        SESSION_COUNTS.hall + SESSION_COUNTS.ks1 + SESSION_COUNTS.ks2
-      );
+      let warning: string | null = null;
 
-      const requiredCount = SESSION_COUNTS.hall + SESSION_COUNTS.ks1 + SESSION_COUNTS.ks2;
-      const warning = availableStaff.length < requiredCount
-        ? `Only ${availableStaff.length} staff available. ${requiredCount} needed for full cover.`
-        : null;
+      TIME_ROWS.forEach((row) => {
+        const slotAssignment: SlotAssignment = { hall: [], ks1: [], ks2: [], break: [] };
+        const assignedThisSlot = new Set<string>();
+        const currentLocation = Object.fromEntries(availableMembers.map((member) => [member.name, null as ColumnKey | null]));
 
-      result[day] = {
-        hall,
-        ks1,
-        ks2,
-        earlyBreak: [...hall, ...ks1],
-        lateBreak: [...ks2],
-        unassigned,
-        absent,
-        warning,
-      };
+        (["hall", "ks1", "ks2"] as const).forEach((column) => {
+          if (!isDutyActive(column, row.start, row.end)) return;
+
+          const needed = SESSION_COUNTS[column];
+          const continuing = rows.length
+            ? rows[rows.length - 1][column].filter((name) => {
+                const member = availableMembers.find((m) => m.name === name);
+                return !!member && isStaffAvailableForSlot(member, row.start, row.end) && !assignedThisSlot.has(name);
+              })
+            : [];
+
+          continuing.forEach((name) => {
+            if (slotAssignment[column].length < needed) {
+              slotAssignment[column].push(name);
+              assignedThisSlot.add(name);
+              currentLocation[name] = column;
+            }
+          });
+
+          const remainingCandidates = availableMembers
+            .filter((member) => {
+              if (assignedThisSlot.has(member.name)) return false;
+              if (!isStaffAvailableForSlot(member, row.start, row.end)) return false;
+              const prev = previousLocation[member.name];
+              if (prev && prev !== column) return false;
+              return true;
+            })
+            .sort((a, b) => {
+              const aWindow = (a.availableEnd ?? SLOT_END) - (a.availableStart ?? SLOT_START);
+              const bWindow = (b.availableEnd ?? SLOT_END) - (b.availableStart ?? SLOT_START);
+              if (aWindow !== bWindow) return aWindow - bWindow;
+              const aEnd = a.availableEnd ?? SLOT_END;
+              const bEnd = b.availableEnd ?? SLOT_END;
+              if (aEnd !== bEnd) return aEnd - bEnd;
+              const aLoad = loadCount[a.name] ?? 0;
+              const bLoad = loadCount[b.name] ?? 0;
+              if (aLoad !== bLoad) return aLoad - bLoad;
+              const aOrder = orderIndex[a.name] ?? 999;
+              const bOrder = orderIndex[b.name] ?? 999;
+              if (aOrder !== bOrder) return aOrder - bOrder;
+              return a.name.localeCompare(b.name);
+            });
+
+          remainingCandidates.forEach((member) => {
+            if (slotAssignment[column].length >= needed) return;
+            slotAssignment[column].push(member.name);
+            assignedThisSlot.add(member.name);
+            currentLocation[member.name] = column;
+          });
+
+          if (slotAssignment[column].length < needed && !warning) {
+            warning = `Not enough staff to cover ${column.toUpperCase()} at ${row.label}.`;
+          }
+        });
+
+        slotAssignment.break = availableMembers
+          .filter((member) => !assignedThisSlot.has(member.name) && isStaffAvailableForSlot(member, row.start, row.end))
+          .map((member) => member.name);
+
+        availableMembers.forEach((member) => {
+          if (currentLocation[member.name] === "hall" || currentLocation[member.name] === "ks1" || currentLocation[member.name] === "ks2") {
+            loadCount[member.name] += 1;
+          }
+          previousLocation[member.name] = currentLocation[member.name];
+        });
+
+        rows.push(slotAssignment);
+      });
+
+      result[day] = { rows, absent, warning };
     });
 
     return result;
   }, [staff, absentByDay]);
 
+  const dayPlan = weekSchedule[selectedDay];
+  const weekDisplay = formatDateForDisplay(weekCommencing);
+  const selectedDayDate = addDays(weekCommencing, DAYS.indexOf(selectedDay));
+  const segments = {
+    hall: buildSegments(dayPlan.rows, "hall"),
+    ks1: buildSegments(dayPlan.rows, "ks1"),
+    ks2: buildSegments(dayPlan.rows, "ks2"),
+    break: buildSegments(dayPlan.rows, "break"),
+  };
+
   function cellNames(names: string[]) {
     if (!names.length) return <span className="emptyText">—</span>;
-
     return (
       <div className="nameList">
-        {names.map((name) => (
-          <div key={name} className="nameChip">
-            {name}
-          </div>
-        ))}
+        {names.map((name) => {
+          const member = staff.find((item) => item.name === name);
+          return (
+            <div key={name} className="nameChip">
+              <div className="nameTitle">{name}</div>
+              {member ? <div className="nameSub">{availabilityLabel(member)}</div> : null}
+            </div>
+          );
+        })}
       </div>
     );
   }
-
-  function getCellContent(dayPlan: DayPlan, rowStart: number, rowEnd: number, column: string) {
-    const hallActive = isActive(11 * 60 + 55, rowStart, rowEnd, 12 * 60 + 45);
-    const ks1Active = isActive(12 * 60 + 10, rowStart, rowEnd, 13 * 60);
-    const ks2Active = isActive(12 * 60 + 15, rowStart, rowEnd, 13 * 60);
-    const earlyBreakActive = isActive(11 * 60 + 25, rowStart, rowEnd, 11 * 60 + 55);
-    const lateBreakActive = isActive(13 * 60, rowStart, rowEnd, 13 * 60 + 30);
-
-    if (column === "hall") return hallActive ? cellNames(dayPlan.hall) : <span className="emptyText">—</span>;
-    if (column === "ks1") return ks1Active ? cellNames(dayPlan.ks1) : <span className="emptyText">—</span>;
-    if (column === "ks2") return ks2Active ? cellNames(dayPlan.ks2) : <span className="emptyText">—</span>;
-    if (column === "break") {
-      if (earlyBreakActive) return cellNames(dayPlan.earlyBreak);
-      if (lateBreakActive) return cellNames(dayPlan.lateBreak);
-      return <span className="emptyText">—</span>;
-    }
-    return <span className="emptyText">—</span>;
-  }
-
-  const weekDisplay = formatDateForDisplay(weekCommencing);
-  const dayPlan = weekSchedule[selectedDay];
-  const selectedDayDate = addDays(weekCommencing, DAYS.indexOf(selectedDay));
 
   return (
     <div className="page">
@@ -244,7 +330,7 @@ export default function Home() {
         <div>
           <h1>School Lunch & Playtime Rota</h1>
           <p>
-            One timetable view for the week, with quick day switching and day-specific absences for sickness or part-time staff.
+            Single-day timetable view for the week, with staff constraints, day-specific absences, and merged cells so names do not repeat every five minutes.
           </p>
         </div>
         <div className="summaryCard">
@@ -298,14 +384,15 @@ export default function Home() {
         </div>
 
         <div className="staffPills">
-          {staff.map((name) => (
+          {staff.map((member) => (
             <button
-              key={name}
+              key={member.name}
               className="staffPill"
-              onClick={() => removeStaff(name)}
-              title={`Remove ${name}`}
+              onClick={() => removeStaff(member.name)}
+              title={`Remove ${member.name}`}
             >
-              {name} <span>×</span>
+              <span className="pillTitle">{member.name}</span>
+              <span className="pillSub">{availabilityLabel(member)}</span>
             </button>
           ))}
         </div>
@@ -314,7 +401,7 @@ export default function Home() {
           <div className="legendItem"><span className="legendSwatch hall" /> Hall</div>
           <div className="legendItem"><span className="legendSwatch ks1" /> KS1 Playground</div>
           <div className="legendItem"><span className="legendSwatch ks2" /> KS2 Playground</div>
-          <div className="legendItem"><span className="legendSwatch break" /> Break</div>
+          <div className="legendItem"><span className="legendSwatch break" /> Break / spare</div>
           <div className="legendItem"><span className="legendSwatch absent" /> Absent for selected day</div>
         </div>
       </div>
@@ -327,9 +414,9 @@ export default function Home() {
             <div className="printMeta">Date: {selectedDayDate}</div>
           </div>
           <div className="dayMeta">
-            <span>Hall {dayPlan.hall.length}</span>
-            <span>KS1 {dayPlan.ks1.length}</span>
-            <span>KS2 {dayPlan.ks2.length}</span>
+            <span>Hall needs 3</span>
+            <span>KS1 needs 4</span>
+            <span>KS2 needs 3</span>
             <span>Absent {dayPlan.absent.length}</span>
           </div>
         </div>
@@ -339,18 +426,19 @@ export default function Home() {
         <div className="absenceCard noPrint">
           <div className="absenceHeader">
             <h3>Who is absent or unavailable on {selectedDay}?</h3>
-            <p>Click a name to toggle them out for this day only. The timetable updates immediately.</p>
+            <p>Click a name to toggle them out for this day only. Time constraints stay in place automatically.</p>
           </div>
           <div className="absencePills">
-            {staff.map((name) => {
-              const isAbsent = dayPlan.absent.includes(name);
+            {staff.map((member) => {
+              const isAbsent = dayPlan.absent.includes(member.name);
               return (
                 <button
-                  key={name}
+                  key={member.name}
                   className={`absencePill ${isAbsent ? "absent" : "present"}`}
-                  onClick={() => toggleAbsent(selectedDay, name)}
+                  onClick={() => toggleAbsent(selectedDay, member.name)}
                 >
-                  {name}
+                  <span className="pillTitle">{member.name}</span>
+                  <span className="pillSub">{availabilityLabel(member)}</span>
                 </button>
               );
             })}
@@ -365,30 +453,41 @@ export default function Home() {
                 <th>Hall</th>
                 <th>KS1 Playground</th>
                 <th>KS2 Playground</th>
-                <th>Break</th>
+                <th>Break / spare</th>
               </tr>
             </thead>
             <tbody>
-              {TIME_ROWS.map((row) => (
+              {TIME_ROWS.map((row, index) => (
                 <tr key={row.id}>
                   <td className="timeCell">{row.label}</td>
-                  <td className="hallCell">{getCellContent(dayPlan, row.start, row.end, "hall")}</td>
-                  <td className="ks1Cell">{getCellContent(dayPlan, row.start, row.end, "ks1")}</td>
-                  <td className="ks2Cell">{getCellContent(dayPlan, row.start, row.end, "ks2")}</td>
-                  <td className="breakCell">{getCellContent(dayPlan, row.start, row.end, "break")}</td>
+                  {segments.hall[index] ? (
+                    <td className="hallCell" rowSpan={segments.hall[index]!.rowSpan}>
+                      {cellNames(segments.hall[index]!.names)}
+                    </td>
+                  ) : null}
+                  {segments.ks1[index] ? (
+                    <td className="ks1Cell" rowSpan={segments.ks1[index]!.rowSpan}>
+                      {cellNames(segments.ks1[index]!.names)}
+                    </td>
+                  ) : null}
+                  {segments.ks2[index] ? (
+                    <td className="ks2Cell" rowSpan={segments.ks2[index]!.rowSpan}>
+                      {cellNames(segments.ks2[index]!.names)}
+                    </td>
+                  ) : null}
+                  {segments.break[index] ? (
+                    <td className="breakCell" rowSpan={segments.break[index]!.rowSpan}>
+                      {cellNames(segments.break[index]!.names)}
+                    </td>
+                  ) : null}
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
 
-        <div className="footerGrid">
-          <div className="footerNote">
-            <strong>Spare / unassigned staff:</strong> {dayPlan.unassigned.length ? dayPlan.unassigned.join(", ") : "None"}
-          </div>
-          <div className="footerNote">
-            <strong>Absent staff:</strong> {dayPlan.absent.length ? dayPlan.absent.join(", ") : "None"}
-          </div>
+        <div className="footerNote">
+          <strong>Absent staff:</strong> {dayPlan.absent.length ? dayPlan.absent.join(", ") : "None"}
         </div>
       </section>
 
@@ -409,7 +508,7 @@ export default function Home() {
           flex-wrap: wrap;
         }
         h1 { margin: 0 0 8px; font-size: 32px; }
-        p { margin: 0; color: #475569; max-width: 780px; }
+        p { margin: 0; color: #475569; max-width: 820px; }
         .summaryCard, .toolbarCard, .dayCard, .absenceCard {
           background: rgba(255, 255, 255, 0.92);
           backdrop-filter: blur(8px);
@@ -441,10 +540,15 @@ export default function Home() {
         .dayTab.active { background: #0f172a; color: white; border-color: #0f172a; }
         .staffPills, .absencePills { display: flex; flex-wrap: wrap; gap: 8px; }
         .staffPills { margin-bottom: 14px; }
-        .staffPill {
-          border: 0; background: #e0e7ff; color: #312e81; border-radius: 999px; padding: 8px 12px; cursor: pointer; font-weight: 600;
+        .staffPill, .absencePill {
+          border-radius: 16px; padding: 8px 12px; cursor: pointer; border: 1px solid transparent; text-align: left;
+          display: flex; flex-direction: column; gap: 2px;
         }
-        .staffPill span { opacity: 0.7; }
+        .staffPill { background: #e0e7ff; color: #312e81; }
+        .absencePill.present { background: #ecfeff; color: #155e75; border-color: #a5f3fc; }
+        .absencePill.absent { background: #fee2e2; color: #991b1b; border-color: #fecaca; }
+        .pillTitle { font-weight: 700; }
+        .pillSub { font-size: 11px; opacity: 0.8; }
         .legend { display: flex; flex-wrap: wrap; gap: 14px; font-size: 14px; color: #475569; }
         .legendItem { display: flex; align-items: center; gap: 8px; }
         .legendSwatch { width: 14px; height: 14px; border-radius: 4px; display: inline-block; }
@@ -470,11 +574,6 @@ export default function Home() {
         .absenceHeader { margin-bottom: 12px; }
         .absenceHeader h3 { margin: 0 0 6px; font-size: 16px; }
         .absenceHeader p { font-size: 14px; color: #64748b; }
-        .absencePill {
-          border-radius: 999px; padding: 8px 12px; cursor: pointer; font-weight: 700; border: 1px solid transparent;
-        }
-        .absencePill.present { background: #ecfeff; color: #155e75; border-color: #a5f3fc; }
-        .absencePill.absent { background: #fee2e2; color: #991b1b; border-color: #fecaca; }
         .tableWrap { overflow-x: auto; }
         .rotaTable {
           width: 100%; border-collapse: separate; border-spacing: 0; min-width: 760px; font-size: 14px;
@@ -497,15 +596,13 @@ export default function Home() {
         .breakCell { background: #f5f3ff; }
         .nameList { display: flex; flex-direction: column; gap: 4px; }
         .nameChip {
-          background: rgba(255,255,255,0.9); border: 1px solid rgba(148,163,184,0.2); border-radius: 10px;
-          padding: 5px 7px; font-weight: 600; color: #1e293b; font-size: 12px;
+          background: rgba(255,255,255,0.92); border: 1px solid rgba(148,163,184,0.2); border-radius: 10px;
+          padding: 5px 7px; color: #1e293b;
         }
+        .nameTitle { font-weight: 700; }
+        .nameSub { font-size: 11px; color: #64748b; margin-top: 2px; }
         .emptyText { color: #94a3b8; }
-        .footerGrid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
-        .footerNote { font-size: 14px; color: #475569; }
-        @media (max-width: 900px) {
-          .footerGrid { grid-template-columns: 1fr; }
-        }
+        .footerNote { margin-top: 14px; font-size: 14px; color: #475569; }
         @media (max-width: 700px) {
           .page { padding: 14px; }
           h1 { font-size: 26px; }
