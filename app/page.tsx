@@ -13,6 +13,8 @@ type StaffMember = {
   availableEnd?: number;
 };
 
+type BreakWindow = { start: number; end: number } | null;
+
 type BreakAssignment = {
   lunch: string[];
   spare: string[];
@@ -29,18 +31,17 @@ type DayPlan = {
   rows: SlotAssignment[];
   absent: string[];
   warning: string | null;
-  lunchBreaks: Record<string, { start: number; end: number } | null>;
+  lunchBreaks: Record<string, BreakWindow>;
 };
 
 type SegmentCell = {
   rowSpan: number;
-  value: string;
 } | null;
 
 const SLOT_START = 11 * 60 + 25;
 const SLOT_END = 13 * 60 + 30;
 const SLOT_STEP = 5;
-const LUNCH_BREAK_SLOTS = 6; // 30 minutes in 5-minute blocks
+const LUNCH_BREAK_SLOTS = 6; // 30 minutes
 
 const DEFAULT_STAFF: StaffMember[] = [
   { name: "Paul", availableStart: 11 * 60 + 55, availableEnd: 12 * 60 + 45 },
@@ -91,7 +92,12 @@ function buildTimeRows() {
   const rows: { id: string; start: number; end: number; label: string }[] = [];
   for (let start = SLOT_START; start < SLOT_END; start += SLOT_STEP) {
     const end = start + SLOT_STEP;
-    rows.push({ id: `${start}-${end}`, start, end, label: `${formatTime(start)}–${formatTime(end)}` });
+    rows.push({
+      id: `${start}-${end}`,
+      start,
+      end,
+      label: `${formatTime(start)}–${formatTime(end)}`,
+    });
   }
   return rows;
 }
@@ -134,6 +140,14 @@ function requiredCount(column: DutyColumnKey, rowStart: number, rowEnd: number) 
   return rowStart >= 12 * 60 + 15 && rowEnd <= 13 * 60 ? 3 : 0;
 }
 
+function dutyNeedForRow(rowStart: number, rowEnd: number) {
+  return (
+    requiredCount("hall", rowStart, rowEnd) +
+    requiredCount("ks1", rowStart, rowEnd) +
+    requiredCount("ks2", rowStart, rowEnd)
+  );
+}
+
 function breakSignature(breakInfo: BreakAssignment) {
   return `L:${breakInfo.lunch.join("|")}__S:${breakInfo.spare.join("|")}`;
 }
@@ -141,34 +155,118 @@ function breakSignature(breakInfo: BreakAssignment) {
 function buildSegments(rows: SlotAssignment[], column: ColumnKey): SegmentCell[] {
   const segments: SegmentCell[] = new Array(rows.length).fill(null);
   let index = 0;
+
   while (index < rows.length) {
-    const value = column === "break" ? breakSignature(rows[index].break) : rows[index][column].join("|");
+    const value =
+      column === "break"
+        ? breakSignature(rows[index].break)
+        : rows[index][column].join("|");
+
     let span = 1;
     while (index + span < rows.length) {
-      const nextValue = column === "break" ? breakSignature(rows[index + span].break) : rows[index + span][column].join("|");
+      const nextValue =
+        column === "break"
+          ? breakSignature(rows[index + span].break)
+          : rows[index + span][column].join("|");
       if (nextValue !== value) break;
       span += 1;
     }
-    segments[index] = { rowSpan: span, value };
+
+    segments[index] = { rowSpan: span };
     index += span;
   }
+
   return segments;
 }
 
 function timeOptions() {
   const values: number[] = [];
-  for (let minute = SLOT_START; minute <= SLOT_END; minute += SLOT_STEP) values.push(minute);
+  for (let minute = SLOT_START; minute <= SLOT_END; minute += SLOT_STEP) {
+    values.push(minute);
+  }
   return values;
 }
 
 const TIME_OPTIONS = timeOptions();
+
+function assignLunchBreaks(members: StaffMember[]) {
+  const breaksPerRow = Array(TIME_ROWS.length).fill(0);
+
+  const rowCapacity = TIME_ROWS.map((row) => {
+    const availableCount = members.filter((member) =>
+      isStaffAvailableForSlot(member, row.start, row.end)
+    ).length;
+    return Math.max(0, availableCount - dutyNeedForRow(row.start, row.end));
+  });
+
+  const lunchBreaks: Record<string, BreakWindow> = Object.fromEntries(
+    members.map((m) => [m.name, null])
+  );
+
+  const sortedMembers = [...members].sort((a, b) => {
+    const aWindow = (a.availableEnd ?? SLOT_END) - (a.availableStart ?? SLOT_START);
+    const bWindow = (b.availableEnd ?? SLOT_END) - (b.availableStart ?? SLOT_START);
+    if (aWindow !== bWindow) return aWindow - bWindow;
+    return a.name.localeCompare(b.name);
+  });
+
+  sortedMembers.forEach((member, memberIndex) => {
+    const possibleStarts: { index: number; score: number }[] = [];
+
+    for (let startIndex = 0; startIndex <= TIME_ROWS.length - LUNCH_BREAK_SLOTS; startIndex += 1) {
+      const endIndex = startIndex + LUNCH_BREAK_SLOTS - 1;
+      const windowStart = TIME_ROWS[startIndex].start;
+      const windowEnd = TIME_ROWS[endIndex].end;
+
+      if (!isStaffAvailableForSlot(member, windowStart, windowEnd)) continue;
+
+      let feasible = true;
+      let score = 0;
+
+      for (let i = startIndex; i <= endIndex; i += 1) {
+        if (breaksPerRow[i] >= rowCapacity[i]) {
+          feasible = false;
+          break;
+        }
+        score += breaksPerRow[i] * 10 + Math.max(0, 3 - rowCapacity[i]);
+      }
+
+      if (feasible) {
+        const centreBias = Math.abs(
+          startIndex - Math.floor((TIME_ROWS.length - LUNCH_BREAK_SLOTS) / 2)
+        );
+        score += centreBias + memberIndex;
+        possibleStarts.push({ index: startIndex, score });
+      }
+    }
+
+    if (!possibleStarts.length) return;
+
+    possibleStarts.sort((a, b) => a.score - b.score || a.index - b.index);
+    const chosenStart = possibleStarts[0].index;
+    const chosenEnd = chosenStart + LUNCH_BREAK_SLOTS - 1;
+
+    for (let i = chosenStart; i <= chosenEnd; i += 1) {
+      breaksPerRow[i] += 1;
+    }
+
+    lunchBreaks[member.name] = {
+      start: TIME_ROWS[chosenStart].start,
+      end: TIME_ROWS[chosenEnd].end,
+    };
+  });
+
+  return lunchBreaks;
+}
 
 export default function Home() {
   const [staff, setStaff] = useState<StaffMember[]>(DEFAULT_STAFF);
   const [input, setInput] = useState("");
   const [weekCommencing, setWeekCommencing] = useState("2026-03-23");
   const [selectedDay, setSelectedDay] = useState<DayName>("Monday");
-  const [absentByDay, setAbsentByDay] = useState<Record<DayName, string[]>>(buildInitialAbsenceState());
+  const [absentByDay, setAbsentByDay] = useState<Record<DayName, string[]>>(
+    buildInitialAbsenceState()
+  );
 
   const addStaff = () => {
     const trimmed = input.trim();
@@ -192,7 +290,11 @@ export default function Home() {
     });
   };
 
-  const updateStaffWindow = (name: string, field: "availableStart" | "availableEnd", value: string) => {
+  const updateStaffWindow = (
+    name: string,
+    field: "availableStart" | "availableEnd",
+    value: string
+  ) => {
     const numericValue = value === "all" ? undefined : Number(value);
     setStaff((prev) =>
       prev.map((member) => {
@@ -213,7 +315,11 @@ export default function Home() {
 
   const clearStaffWindow = (name: string) => {
     setStaff((prev) =>
-      prev.map((member) => (member.name === name ? { ...member, availableStart: undefined, availableEnd: undefined } : member))
+      prev.map((member) =>
+        member.name === name
+          ? { ...member, availableStart: undefined, availableEnd: undefined }
+          : member
+      )
     );
   };
 
@@ -235,21 +341,37 @@ export default function Home() {
     DAYS.forEach((day, dayIndex) => {
       const absent = absentByDay[day] || [];
       const availableMembers = staff.filter((member) => !absent.includes(member.name));
+      const lunchBreaks = assignLunchBreaks(availableMembers);
+
       const rows: SlotAssignment[] = [];
       const loadCount = Object.fromEntries(availableMembers.map((member) => [member.name, 0]));
-      let previousLocation = Object.fromEntries(availableMembers.map((member) => [member.name, null as ColumnKey | null]));
+      let previousLocation = Object.fromEntries(
+        availableMembers.map((member) => [member.name, null as ColumnKey | null])
+      );
+
       const rotationIndex = availableMembers.length ? (dayIndex * 2) % availableMembers.length : 0;
       const rotatedNames = [
         ...availableMembers.slice(rotationIndex).map((member) => member.name),
         ...availableMembers.slice(0, rotationIndex).map((member) => member.name),
       ];
-      const orderIndex = Object.fromEntries(rotatedNames.map((name, index) => [name, index]));
+      const orderIndex = Object.fromEntries(
+        rotatedNames.map((name, index) => [name, index])
+      );
+
       let warning: string | null = null;
 
       TIME_ROWS.forEach((row) => {
-        const slotAssignment: SlotAssignment = { hall: [], ks1: [], ks2: [], break: { lunch: [], spare: [] } };
+        const slotAssignment: SlotAssignment = {
+          hall: [],
+          ks1: [],
+          ks2: [],
+          break: { lunch: [], spare: [] },
+        };
+
         const assignedThisSlot = new Set<string>();
-        const currentLocation = Object.fromEntries(availableMembers.map((member) => [member.name, null as ColumnKey | null]));
+        const currentLocation = Object.fromEntries(
+          availableMembers.map((member) => [member.name, null as ColumnKey | null])
+        );
 
         (["hall", "ks1", "ks2"] as const).forEach((column) => {
           const needed = requiredCount(column, row.start, row.end);
@@ -258,7 +380,15 @@ export default function Home() {
           const continuing = rows.length
             ? rows[rows.length - 1][column].filter((name) => {
                 const member = availableMembers.find((m) => m.name === name);
-                return !!member && isStaffAvailableForSlot(member, row.start, row.end) && !assignedThisSlot.has(name);
+                const lunch = lunchBreaks[name];
+                const onLunch =
+                  !!lunch && row.start >= lunch.start && row.end <= lunch.end;
+                return (
+                  !!member &&
+                  !onLunch &&
+                  isStaffAvailableForSlot(member, row.start, row.end) &&
+                  !assignedThisSlot.has(name)
+                );
               })
             : [];
 
@@ -270,41 +400,79 @@ export default function Home() {
             }
           });
 
-          const remainingCandidates = availableMembers
-            .filter((member) => {
-              if (assignedThisSlot.has(member.name)) return false;
-              if (!isStaffAvailableForSlot(member, row.start, row.end)) return false;
-              const prev = previousLocation[member.name];
-              if (prev && prev !== column) return false;
-              return true;
-            })
-            .sort((a, b) => {
-              const aWindow = (a.availableEnd ?? SLOT_END) - (a.availableStart ?? SLOT_START);
-              const bWindow = (b.availableEnd ?? SLOT_END) - (b.availableStart ?? SLOT_START);
-              if (aWindow !== bWindow) return aWindow - bWindow;
-              const aEnd = a.availableEnd ?? SLOT_END;
-              const bEnd = b.availableEnd ?? SLOT_END;
-              if (aEnd !== bEnd) return aEnd - bEnd;
-              const aLoad = loadCount[a.name] ?? 0;
-              const bLoad = loadCount[b.name] ?? 0;
-              if (aLoad !== bLoad) return aLoad - bLoad;
-              const aOrder = orderIndex[a.name] ?? 999;
-              const bOrder = orderIndex[b.name] ?? 999;
-              if (aOrder !== bOrder) return aOrder - bOrder;
-              return a.name.localeCompare(b.name);
-            });
+          const pickCandidates = (sameLocationOnly: boolean) =>
+            availableMembers
+              .filter((member) => {
+                if (assignedThisSlot.has(member.name)) return false;
+                if (!isStaffAvailableForSlot(member, row.start, row.end)) return false;
 
-          remainingCandidates.forEach((member) => {
-            if (slotAssignment[column].length >= needed) return;
-            slotAssignment[column].push(member.name);
-            assignedThisSlot.add(member.name);
-            currentLocation[member.name] = column;
+                const lunch = lunchBreaks[member.name];
+                const onLunch =
+                  !!lunch && row.start >= lunch.start && row.end <= lunch.end;
+                if (onLunch) return false;
+
+                const prev = previousLocation[member.name];
+                if (sameLocationOnly && prev && prev !== column) return false;
+
+                return true;
+              })
+              .sort((a, b) => {
+                const aWindow =
+                  (a.availableEnd ?? SLOT_END) - (a.availableStart ?? SLOT_START);
+                const bWindow =
+                  (b.availableEnd ?? SLOT_END) - (b.availableStart ?? SLOT_START);
+                if (aWindow !== bWindow) return aWindow - bWindow;
+
+                const aLoad = loadCount[a.name] ?? 0;
+                const bLoad = loadCount[b.name] ?? 0;
+                if (aLoad !== bLoad) return aLoad - bLoad;
+
+                const aOrder = orderIndex[a.name] ?? 999;
+                const bOrder = orderIndex[b.name] ?? 999;
+                if (aOrder !== bOrder) return aOrder - bOrder;
+
+                return a.name.localeCompare(b.name);
+              });
+
+          [true, false].forEach((sameLocationOnly) => {
+            pickCandidates(sameLocationOnly).forEach((member) => {
+              if (slotAssignment[column].length >= needed) return;
+              if (assignedThisSlot.has(member.name)) return;
+              slotAssignment[column].push(member.name);
+              assignedThisSlot.add(member.name);
+              currentLocation[member.name] = column;
+            });
           });
 
           if (slotAssignment[column].length < needed && !warning) {
             warning = `Not enough staff to cover ${column.toUpperCase()} at ${row.label}.`;
           }
         });
+
+        const lunch: string[] = [];
+        const spare: string[] = [];
+
+        availableMembers.forEach((member) => {
+          const lunchWindow = lunchBreaks[member.name];
+          const onLunch =
+            !!lunchWindow && row.start >= lunchWindow.start && row.end <= lunchWindow.end;
+          const onDuty =
+            slotAssignment.hall.includes(member.name) ||
+            slotAssignment.ks1.includes(member.name) ||
+            slotAssignment.ks2.includes(member.name);
+
+          if (onLunch && !onDuty) {
+            lunch.push(
+              `${member.name} (${formatTime(lunchWindow.start)}–${formatTime(
+                lunchWindow.end
+              )})`
+            );
+          } else if (!onDuty && isStaffAvailableForSlot(member, row.start, row.end)) {
+            spare.push(member.name);
+          }
+        });
+
+        slotAssignment.break = { lunch, spare };
 
         availableMembers.forEach((member) => {
           const location = currentLocation[member.name];
@@ -317,66 +485,14 @@ export default function Home() {
         rows.push(slotAssignment);
       });
 
-      const lunchBreaks: Record<string, { start: number; end: number } | null> = Object.fromEntries(
-        availableMembers.map((member) => [member.name, null])
-      );
-
-      availableMembers.forEach((member) => {
-        let runStart = -1;
-        let runLength = 0;
-
-        for (let i = 0; i < TIME_ROWS.length; i += 1) {
-          const row = TIME_ROWS[i];
-          const isAvailable = isStaffAvailableForSlot(member, row.start, row.end);
-          const onDuty = rows[i].hall.includes(member.name) || rows[i].ks1.includes(member.name) || rows[i].ks2.includes(member.name);
-
-          if (isAvailable && !onDuty) {
-            if (runStart === -1) runStart = i;
-            runLength += 1;
-            if (runLength >= LUNCH_BREAK_SLOTS) {
-              lunchBreaks[member.name] = {
-                start: TIME_ROWS[runStart].start,
-                end: TIME_ROWS[runStart + LUNCH_BREAK_SLOTS - 1].end,
-              };
-              break;
-            }
-          } else {
-            runStart = -1;
-            runLength = 0;
-          }
-        }
-      });
-
-      rows.forEach((row) => {
-        const freeStaff = availableMembers
-          .filter((member) => !row.hall.includes(member.name) && !row.ks1.includes(member.name) && !row.ks2.includes(member.name))
-          .filter((member) => isStaffAvailableForSlot(member, TIME_ROWS[rows.indexOf(row)].start, TIME_ROWS[rows.indexOf(row)].end));
-
-        const lunch: string[] = [];
-        const spare: string[] = [];
-
-        freeStaff.forEach((member) => {
-          const lunchWindow = lunchBreaks[member.name];
-          const rowInfo = TIME_ROWS[rows.indexOf(row)];
-          const onLunch = !!lunchWindow && rowInfo.start >= lunchWindow.start && rowInfo.end <= lunchWindow.end;
-          if (onLunch) {
-            lunch.push(`${member.name} (${formatTime(lunchWindow!.start)}–${formatTime(lunchWindow!.end)})`);
-          } else {
-            spare.push(member.name);
-          }
-        });
-
-        row.break = { lunch, spare };
-      });
-
       const noLunchNames = availableMembers
         .filter((member) => !lunchBreaks[member.name])
         .map((member) => member.name);
 
       if (!warning && noLunchNames.length) {
-        warning = `No 30-minute lunch break could be found for: ${noLunchNames.join(", ")}.`;
+        warning = `Unable to place a full 30-minute lunch break for: ${noLunchNames.join(", ")}.`;
       } else if (warning && noLunchNames.length) {
-        warning += ` No 30-minute lunch break could be found for: ${noLunchNames.join(", ")}.`;
+        warning += ` Unable to place a full 30-minute lunch break for: ${noLunchNames.join(", ")}.`;
       }
 
       result[day] = { rows, absent, warning, lunchBreaks };
@@ -388,6 +504,7 @@ export default function Home() {
   const dayPlan = weekSchedule[selectedDay];
   const weekDisplay = formatDateForDisplay(weekCommencing);
   const selectedDayDate = addDays(weekCommencing, DAYS.indexOf(selectedDay));
+
   const segments = {
     hall: buildSegments(dayPlan.rows, "hall"),
     ks1: buildSegments(dayPlan.rows, "ks1"),
@@ -400,26 +517,28 @@ export default function Home() {
     return (
       <div className="nameList">
         {names.map((name) => (
-          <div key={name} className="nameChip">{name}</div>
+          <div key={name} className="nameChip">
+            {name}
+          </div>
         ))}
       </div>
     );
   }
 
   function breakCellContent(breakInfo: BreakAssignment) {
-    const hasLunch = breakInfo.lunch.length > 0;
-    const hasSpare = breakInfo.spare.length > 0;
-    if (!hasLunch && !hasSpare) return <span className="emptyText">—</span>;
+    if (!breakInfo.lunch.length && !breakInfo.spare.length) {
+      return <span className="emptyText">—</span>;
+    }
 
     return (
       <div className="breakGroups">
-        {hasLunch ? (
+        {breakInfo.lunch.length ? (
           <div className="breakGroup">
             <div className="breakGroupTitle">On lunch break</div>
             {cellNames(breakInfo.lunch)}
           </div>
         ) : null}
-        {hasSpare ? (
+        {breakInfo.spare.length ? (
           <div className="breakGroup">
             <div className="breakGroupTitle">Spare</div>
             {cellNames(breakInfo.spare)}
@@ -435,7 +554,8 @@ export default function Home() {
         <div>
           <h1>School Lunch & Playtime Rota</h1>
           <p>
-            Single-day timetable view for the week, with configurable staff windows, day-specific absences, merged cells, cover rules of 2 in the hall from 11:55–12:00 then 3 from 12:00 onwards, and a separate view of lunch breaks versus spare staff.
+            Lunch breaks are now allocated first, then duties are built around them
+            so every possible 30-minute lunch break is protected before cover is assigned.
           </p>
         </div>
         <div className="summaryCard">
@@ -467,8 +587,12 @@ export default function Home() {
             />
           </div>
 
-          <button onClick={addStaff} className="primaryButton">Add staff</button>
-          <button onClick={() => window.print()} className="secondaryButton">Print / Save PDF</button>
+          <button onClick={addStaff} className="primaryButton">
+            Add staff
+          </button>
+          <button onClick={() => window.print()} className="secondaryButton">
+            Print / Save PDF
+          </button>
         </div>
 
         <div className="dayTabs">
@@ -495,7 +619,10 @@ export default function Home() {
       <div className="configCard noPrint">
         <div className="configHeader">
           <h3>Staff availability windows</h3>
-          <p>The timetable uses these timings in the background. They are not shown in the planner cells.</p>
+          <p>
+            The planner stays clean, but the engine still respects these timings for
+            cover and lunch break allocation.
+          </p>
         </div>
         <div className="configTableWrap">
           <table className="configTable">
@@ -515,31 +642,49 @@ export default function Home() {
                   <td>
                     <select
                       value={member.availableStart ?? "all"}
-                      onChange={(e) => updateStaffWindow(member.name, "availableStart", e.target.value)}
+                      onChange={(e) =>
+                        updateStaffWindow(member.name, "availableStart", e.target.value)
+                      }
                       className="configSelect"
                     >
                       <option value="all">All lunch</option>
                       {TIME_OPTIONS.map((value) => (
-                        <option key={`start-${member.name}-${value}`} value={value}>{formatTime(value)}</option>
+                        <option key={`start-${member.name}-${value}`} value={value}>
+                          {formatTime(value)}
+                        </option>
                       ))}
                     </select>
                   </td>
                   <td>
                     <select
                       value={member.availableEnd ?? "all"}
-                      onChange={(e) => updateStaffWindow(member.name, "availableEnd", e.target.value)}
+                      onChange={(e) =>
+                        updateStaffWindow(member.name, "availableEnd", e.target.value)
+                      }
                       className="configSelect"
                     >
                       <option value="all">All lunch</option>
                       {TIME_OPTIONS.map((value) => (
-                        <option key={`end-${member.name}-${value}`} value={value}>{formatTime(value)}</option>
+                        <option key={`end-${member.name}-${value}`} value={value}>
+                          {formatTime(value)}
+                        </option>
                       ))}
                     </select>
                   </td>
                   <td>{availabilityLabel(member)}</td>
                   <td>
-                    <button onClick={() => clearStaffWindow(member.name)} className="miniButton">Clear</button>
-                    <button onClick={() => removeStaff(member.name)} className="miniButton danger">Remove</button>
+                    <button
+                      onClick={() => clearStaffWindow(member.name)}
+                      className="miniButton"
+                    >
+                      Clear
+                    </button>
+                    <button
+                      onClick={() => removeStaff(member.name)}
+                      className="miniButton danger"
+                    >
+                      Remove
+                    </button>
                   </td>
                 </tr>
               ))}
@@ -568,7 +713,7 @@ export default function Home() {
         <div className="absenceCard noPrint">
           <div className="absenceHeader">
             <h3>Who is absent or unavailable on {selectedDay}?</h3>
-            <p>Click a name to toggle them out for this day only. Their configured time window still applies on all other days.</p>
+            <p>Click a name to toggle them out for this day only.</p>
           </div>
           <div className="absencePills">
             {staff.map((member) => {
@@ -602,10 +747,26 @@ export default function Home() {
               {TIME_ROWS.map((row, index) => (
                 <tr key={row.id}>
                   <td className="timeCell">{row.label}</td>
-                  {segments.hall[index] ? <td className="hallCell" rowSpan={segments.hall[index]!.rowSpan}>{cellNames(dayPlan.rows[index].hall)}</td> : null}
-                  {segments.ks1[index] ? <td className="ks1Cell" rowSpan={segments.ks1[index]!.rowSpan}>{cellNames(dayPlan.rows[index].ks1)}</td> : null}
-                  {segments.ks2[index] ? <td className="ks2Cell" rowSpan={segments.ks2[index]!.rowSpan}>{cellNames(dayPlan.rows[index].ks2)}</td> : null}
-                  {segments.break[index] ? <td className="breakCell" rowSpan={segments.break[index]!.rowSpan}>{breakCellContent(dayPlan.rows[index].break)}</td> : null}
+                  {segments.hall[index] ? (
+                    <td className="hallCell" rowSpan={segments.hall[index]!.rowSpan}>
+                      {cellNames(dayPlan.rows[index].hall)}
+                    </td>
+                  ) : null}
+                  {segments.ks1[index] ? (
+                    <td className="ks1Cell" rowSpan={segments.ks1[index]!.rowSpan}>
+                      {cellNames(dayPlan.rows[index].ks1)}
+                    </td>
+                  ) : null}
+                  {segments.ks2[index] ? (
+                    <td className="ks2Cell" rowSpan={segments.ks2[index]!.rowSpan}>
+                      {cellNames(dayPlan.rows[index].ks2)}
+                    </td>
+                  ) : null}
+                  {segments.break[index] ? (
+                    <td className="breakCell" rowSpan={segments.break[index]!.rowSpan}>
+                      {breakCellContent(dayPlan.rows[index].break)}
+                    </td>
+                  ) : null}
                 </tr>
               ))}
             </tbody>
@@ -613,7 +774,8 @@ export default function Home() {
         </div>
 
         <div className="footerNote">
-          <strong>Absent staff:</strong> {dayPlan.absent.length ? dayPlan.absent.join(", ") : "None"}
+          <strong>Absent staff:</strong>{" "}
+          {dayPlan.absent.length ? dayPlan.absent.join(", ") : "None"}
         </div>
       </section>
 
