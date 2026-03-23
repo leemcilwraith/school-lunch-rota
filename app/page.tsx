@@ -4,7 +4,8 @@ import { useMemo, useState } from "react";
 
 const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"] as const;
 type DayName = (typeof DAYS)[number];
-type ColumnKey = "hall" | "ks1" | "ks2" | "break";
+type DutyColumnKey = "hall" | "ks1" | "ks2";
+type ColumnKey = DutyColumnKey | "break";
 
 type StaffMember = {
   name: string;
@@ -12,27 +13,34 @@ type StaffMember = {
   availableEnd?: number;
 };
 
+type BreakAssignment = {
+  lunch: string[];
+  spare: string[];
+};
+
 type SlotAssignment = {
   hall: string[];
   ks1: string[];
   ks2: string[];
-  break: string[];
+  break: BreakAssignment;
 };
 
 type DayPlan = {
   rows: SlotAssignment[];
   absent: string[];
   warning: string | null;
+  lunchBreaks: Record<string, { start: number; end: number } | null>;
 };
 
 type SegmentCell = {
-  names: string[];
   rowSpan: number;
+  value: string;
 } | null;
 
 const SLOT_START = 11 * 60 + 25;
 const SLOT_END = 13 * 60 + 30;
 const SLOT_STEP = 5;
+const LUNCH_BREAK_SLOTS = 6; // 30 minutes in 5-minute blocks
 
 const DEFAULT_STAFF: StaffMember[] = [
   { name: "Paul", availableStart: 11 * 60 + 55, availableEnd: 12 * 60 + 45 },
@@ -113,7 +121,7 @@ function isStaffAvailableForSlot(member: StaffMember, rowStart: number, rowEnd: 
   return startOk && endOk;
 }
 
-function requiredCount(column: Exclude<ColumnKey, "break">, rowStart: number, rowEnd: number) {
+function requiredCount(column: DutyColumnKey, rowStart: number, rowEnd: number) {
   const slotId = `${rowStart}-${rowEnd}`;
   if (column === "hall") {
     if (slotId === `${11 * 60 + 55}-${12 * 60}`) return 2;
@@ -126,16 +134,22 @@ function requiredCount(column: Exclude<ColumnKey, "break">, rowStart: number, ro
   return rowStart >= 12 * 60 + 15 && rowEnd <= 13 * 60 ? 3 : 0;
 }
 
+function breakSignature(breakInfo: BreakAssignment) {
+  return `L:${breakInfo.lunch.join("|")}__S:${breakInfo.spare.join("|")}`;
+}
+
 function buildSegments(rows: SlotAssignment[], column: ColumnKey): SegmentCell[] {
   const segments: SegmentCell[] = new Array(rows.length).fill(null);
   let index = 0;
   while (index < rows.length) {
-    const names = rows[index][column];
+    const value = column === "break" ? breakSignature(rows[index].break) : rows[index][column].join("|");
     let span = 1;
-    while (index + span < rows.length && rows[index + span][column].join("|") === names.join("|")) {
+    while (index + span < rows.length) {
+      const nextValue = column === "break" ? breakSignature(rows[index + span].break) : rows[index + span][column].join("|");
+      if (nextValue !== value) break;
       span += 1;
     }
-    segments[index] = { names, rowSpan: span };
+    segments[index] = { rowSpan: span, value };
     index += span;
   }
   return segments;
@@ -233,7 +247,7 @@ export default function Home() {
       let warning: string | null = null;
 
       TIME_ROWS.forEach((row) => {
-        const slotAssignment: SlotAssignment = { hall: [], ks1: [], ks2: [], break: [] };
+        const slotAssignment: SlotAssignment = { hall: [], ks1: [], ks2: [], break: { lunch: [], spare: [] } };
         const assignedThisSlot = new Set<string>();
         const currentLocation = Object.fromEntries(availableMembers.map((member) => [member.name, null as ColumnKey | null]));
 
@@ -292,10 +306,6 @@ export default function Home() {
           }
         });
 
-        slotAssignment.break = availableMembers
-          .filter((member) => !assignedThisSlot.has(member.name) && isStaffAvailableForSlot(member, row.start, row.end))
-          .map((member) => member.name);
-
         availableMembers.forEach((member) => {
           const location = currentLocation[member.name];
           if (location === "hall" || location === "ks1" || location === "ks2") {
@@ -307,7 +317,69 @@ export default function Home() {
         rows.push(slotAssignment);
       });
 
-      result[day] = { rows, absent, warning };
+      const lunchBreaks: Record<string, { start: number; end: number } | null> = Object.fromEntries(
+        availableMembers.map((member) => [member.name, null])
+      );
+
+      availableMembers.forEach((member) => {
+        let runStart = -1;
+        let runLength = 0;
+
+        for (let i = 0; i < TIME_ROWS.length; i += 1) {
+          const row = TIME_ROWS[i];
+          const isAvailable = isStaffAvailableForSlot(member, row.start, row.end);
+          const onDuty = rows[i].hall.includes(member.name) || rows[i].ks1.includes(member.name) || rows[i].ks2.includes(member.name);
+
+          if (isAvailable && !onDuty) {
+            if (runStart === -1) runStart = i;
+            runLength += 1;
+            if (runLength >= LUNCH_BREAK_SLOTS) {
+              lunchBreaks[member.name] = {
+                start: TIME_ROWS[runStart].start,
+                end: TIME_ROWS[runStart + LUNCH_BREAK_SLOTS - 1].end,
+              };
+              break;
+            }
+          } else {
+            runStart = -1;
+            runLength = 0;
+          }
+        }
+      });
+
+      rows.forEach((row) => {
+        const freeStaff = availableMembers
+          .filter((member) => !row.hall.includes(member.name) && !row.ks1.includes(member.name) && !row.ks2.includes(member.name))
+          .filter((member) => isStaffAvailableForSlot(member, TIME_ROWS[rows.indexOf(row)].start, TIME_ROWS[rows.indexOf(row)].end));
+
+        const lunch: string[] = [];
+        const spare: string[] = [];
+
+        freeStaff.forEach((member) => {
+          const lunchWindow = lunchBreaks[member.name];
+          const rowInfo = TIME_ROWS[rows.indexOf(row)];
+          const onLunch = !!lunchWindow && rowInfo.start >= lunchWindow.start && rowInfo.end <= lunchWindow.end;
+          if (onLunch) {
+            lunch.push(`${member.name} (${formatTime(lunchWindow!.start)}–${formatTime(lunchWindow!.end)})`);
+          } else {
+            spare.push(member.name);
+          }
+        });
+
+        row.break = { lunch, spare };
+      });
+
+      const noLunchNames = availableMembers
+        .filter((member) => !lunchBreaks[member.name])
+        .map((member) => member.name);
+
+      if (!warning && noLunchNames.length) {
+        warning = `No 30-minute lunch break could be found for: ${noLunchNames.join(", ")}.`;
+      } else if (warning && noLunchNames.length) {
+        warning += ` No 30-minute lunch break could be found for: ${noLunchNames.join(", ")}.`;
+      }
+
+      result[day] = { rows, absent, warning, lunchBreaks };
     });
 
     return result;
@@ -328,10 +400,31 @@ export default function Home() {
     return (
       <div className="nameList">
         {names.map((name) => (
-          <div key={name} className="nameChip">
-            {name}
-          </div>
+          <div key={name} className="nameChip">{name}</div>
         ))}
+      </div>
+    );
+  }
+
+  function breakCellContent(breakInfo: BreakAssignment) {
+    const hasLunch = breakInfo.lunch.length > 0;
+    const hasSpare = breakInfo.spare.length > 0;
+    if (!hasLunch && !hasSpare) return <span className="emptyText">—</span>;
+
+    return (
+      <div className="breakGroups">
+        {hasLunch ? (
+          <div className="breakGroup">
+            <div className="breakGroupTitle">On lunch break</div>
+            {cellNames(breakInfo.lunch)}
+          </div>
+        ) : null}
+        {hasSpare ? (
+          <div className="breakGroup">
+            <div className="breakGroupTitle">Spare</div>
+            {cellNames(breakInfo.spare)}
+          </div>
+        ) : null}
       </div>
     );
   }
@@ -342,7 +435,7 @@ export default function Home() {
         <div>
           <h1>School Lunch & Playtime Rota</h1>
           <p>
-            Single-day timetable view for the week, with configurable staff windows, day-specific absences, merged cells, and cover rules of 2 in the hall from 11:55–12:00 then 3 from 12:00 onwards.
+            Single-day timetable view for the week, with configurable staff windows, day-specific absences, merged cells, cover rules of 2 in the hall from 11:55–12:00 then 3 from 12:00 onwards, and a separate view of lunch breaks versus spare staff.
           </p>
         </div>
         <div className="summaryCard">
@@ -427,9 +520,7 @@ export default function Home() {
                     >
                       <option value="all">All lunch</option>
                       {TIME_OPTIONS.map((value) => (
-                        <option key={`start-${member.name}-${value}`} value={value}>
-                          {formatTime(value)}
-                        </option>
+                        <option key={`start-${member.name}-${value}`} value={value}>{formatTime(value)}</option>
                       ))}
                     </select>
                   </td>
@@ -441,9 +532,7 @@ export default function Home() {
                     >
                       <option value="all">All lunch</option>
                       {TIME_OPTIONS.map((value) => (
-                        <option key={`end-${member.name}-${value}`} value={value}>
-                          {formatTime(value)}
-                        </option>
+                        <option key={`end-${member.name}-${value}`} value={value}>{formatTime(value)}</option>
                       ))}
                     </select>
                   </td>
@@ -513,10 +602,10 @@ export default function Home() {
               {TIME_ROWS.map((row, index) => (
                 <tr key={row.id}>
                   <td className="timeCell">{row.label}</td>
-                  {segments.hall[index] ? <td className="hallCell" rowSpan={segments.hall[index]!.rowSpan}>{cellNames(segments.hall[index]!.names)}</td> : null}
-                  {segments.ks1[index] ? <td className="ks1Cell" rowSpan={segments.ks1[index]!.rowSpan}>{cellNames(segments.ks1[index]!.names)}</td> : null}
-                  {segments.ks2[index] ? <td className="ks2Cell" rowSpan={segments.ks2[index]!.rowSpan}>{cellNames(segments.ks2[index]!.names)}</td> : null}
-                  {segments.break[index] ? <td className="breakCell" rowSpan={segments.break[index]!.rowSpan}>{cellNames(segments.break[index]!.names)}</td> : null}
+                  {segments.hall[index] ? <td className="hallCell" rowSpan={segments.hall[index]!.rowSpan}>{cellNames(dayPlan.rows[index].hall)}</td> : null}
+                  {segments.ks1[index] ? <td className="ks1Cell" rowSpan={segments.ks1[index]!.rowSpan}>{cellNames(dayPlan.rows[index].ks1)}</td> : null}
+                  {segments.ks2[index] ? <td className="ks2Cell" rowSpan={segments.ks2[index]!.rowSpan}>{cellNames(dayPlan.rows[index].ks2)}</td> : null}
+                  {segments.break[index] ? <td className="breakCell" rowSpan={segments.break[index]!.rowSpan}>{breakCellContent(dayPlan.rows[index].break)}</td> : null}
                 </tr>
               ))}
             </tbody>
@@ -592,6 +681,9 @@ export default function Home() {
         .breakCell { background: #f5f3ff; }
         .nameList { display: flex; flex-direction: column; gap: 4px; }
         .nameChip { background: rgba(255,255,255,0.92); border: 1px solid rgba(148,163,184,0.2); border-radius: 10px; padding: 5px 7px; color: #1e293b; font-weight: 700; }
+        .breakGroups { display: flex; flex-direction: column; gap: 10px; }
+        .breakGroup { display: flex; flex-direction: column; gap: 4px; }
+        .breakGroupTitle { font-size: 12px; font-weight: 700; color: #6d28d9; text-transform: uppercase; letter-spacing: 0.03em; }
         .emptyText { color: #94a3b8; }
         .footerNote { margin-top: 14px; font-size: 14px; color: #475569; }
         @media (max-width: 700px) { .page { padding: 14px; } h1 { font-size: 26px; } }
