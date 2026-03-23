@@ -10,14 +10,9 @@ const SESSION_COUNTS = {
   ks2: 3,
 };
 
-const TIME_ROWS = [
-  { id: "early-break", label: "11:25–11:55" },
-  { id: "hall-only", label: "11:55–12:10" },
-  { id: "hall-ks1", label: "12:10–12:15" },
-  { id: "full-overlap", label: "12:15–12:45" },
-  { id: "ks1-ks2", label: "12:45–13:00" },
-  { id: "late-break", label: "13:00–13:30" },
-];
+const SLOT_START = 11 * 60 + 25;
+const SLOT_END = 13 * 60 + 30;
+const SLOT_STEP = 5;
 
 type DayPlan = {
   hall: string[];
@@ -27,6 +22,45 @@ type DayPlan = {
   lateBreak: string[];
   unassigned: string[];
 };
+
+function formatTime(totalMinutes: number) {
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return `${String(hours).padStart(2, "0")}:${String(minutes).padStart(2, "0")}`;
+}
+
+function formatDateForDisplay(dateString: string) {
+  if (!dateString) return "";
+  const date = new Date(`${dateString}T00:00:00`);
+  return date.toLocaleDateString("en-GB", {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  });
+}
+
+function buildTimeRows() {
+  const rows: { id: string; start: number; end: number; label: string }[] = [];
+
+  for (let start = SLOT_START; start < SLOT_END; start += SLOT_STEP) {
+    const end = start + SLOT_STEP;
+    rows.push({
+      id: `${start}-${end}`,
+      start,
+      end,
+      label: `${formatTime(start)}–${formatTime(end)}`,
+    });
+  }
+
+  return rows;
+}
+
+const TIME_ROWS = buildTimeRows();
+
+function isActive(start: number, rowStart: number, rowEnd: number, end: number) {
+  return rowStart >= start && rowEnd <= end;
+}
 
 export default function Home() {
   const [staff, setStaff] = useState<string[]>([
@@ -46,6 +80,7 @@ export default function Home() {
     "Noah",
   ]);
   const [input, setInput] = useState("");
+  const [weekCommencing, setWeekCommencing] = useState("2026-03-23");
 
   const addStaff = () => {
     const trimmed = input.trim();
@@ -113,43 +148,33 @@ export default function Home() {
     );
   }
 
-  function getCellContent(dayPlan: DayPlan, rowId: string, column: string) {
-    switch (`${rowId}-${column}`) {
-      case "early-break-break":
-        return cellNames(dayPlan.earlyBreak);
-      case "hall-only-hall":
-        return cellNames(dayPlan.hall);
-      case "hall-ks1-hall":
-        return cellNames(dayPlan.hall);
-      case "hall-ks1-ks1":
-        return cellNames(dayPlan.ks1);
-      case "full-overlap-hall":
-        return cellNames(dayPlan.hall);
-      case "full-overlap-ks1":
-        return cellNames(dayPlan.ks1);
-      case "full-overlap-ks2":
-        return cellNames(dayPlan.ks2);
-      case "ks1-ks2-ks1":
-        return cellNames(dayPlan.ks1);
-      case "ks1-ks2-ks2":
-        return cellNames(dayPlan.ks2);
-      case "ks1-ks2-break":
-        return cellNames(dayPlan.hall);
-      case "late-break-break":
-        return cellNames(dayPlan.lateBreak);
-      default:
-        return <span className="emptyText">—</span>;
+  function getCellContent(dayPlan: DayPlan, rowStart: number, rowEnd: number, column: string) {
+    const hallActive = isActive(11 * 60 + 55, rowStart, rowEnd, 12 * 60 + 45);
+    const ks1Active = isActive(12 * 60 + 10, rowStart, rowEnd, 13 * 60);
+    const ks2Active = isActive(12 * 60 + 15, rowStart, rowEnd, 13 * 60);
+    const earlyBreakActive = isActive(11 * 60 + 25, rowStart, rowEnd, 11 * 60 + 55);
+    const lateBreakActive = isActive(13 * 60, rowStart, rowEnd, 13 * 60 + 30);
+
+    if (column === "hall") return hallActive ? cellNames(dayPlan.hall) : <span className="emptyText">—</span>;
+    if (column === "ks1") return ks1Active ? cellNames(dayPlan.ks1) : <span className="emptyText">—</span>;
+    if (column === "ks2") return ks2Active ? cellNames(dayPlan.ks2) : <span className="emptyText">—</span>;
+    if (column === "break") {
+      if (earlyBreakActive) return cellNames(dayPlan.earlyBreak);
+      if (lateBreakActive) return cellNames(dayPlan.lateBreak);
+      return <span className="emptyText">—</span>;
     }
+    return <span className="emptyText">—</span>;
   }
+
+  const weekDisplay = formatDateForDisplay(weekCommencing);
 
   return (
     <div className="page">
-      <div className="hero">
+      <div className="hero noPrint">
         <div>
           <h1>School Lunch & Playtime Rota</h1>
           <p>
-            Weekly timetable view with locations across the top, times down the
-            side, and breaks clearly shown.
+            Five-minute timetable view with locations across the top, times down the side, and breaks clearly shown.
           </p>
         </div>
         <div className="summaryCard">
@@ -158,7 +183,7 @@ export default function Home() {
         </div>
       </div>
 
-      <div className="toolbarCard">
+      <div className="toolbarCard noPrint">
         <div className="toolbarTop">
           <input
             value={input}
@@ -169,8 +194,24 @@ export default function Home() {
               if (e.key === "Enter") addStaff();
             }}
           />
+
+          <div className="dateBlock">
+            <label htmlFor="weekCommencing">Week commencing</label>
+            <input
+              id="weekCommencing"
+              type="date"
+              value={weekCommencing}
+              onChange={(e) => setWeekCommencing(e.target.value)}
+              className="staffInput"
+            />
+          </div>
+
           <button onClick={addStaff} className="primaryButton">
             Add staff
+          </button>
+
+          <button onClick={() => window.print()} className="secondaryButton">
+            Print / Save PDF
           </button>
         </div>
 
@@ -189,20 +230,16 @@ export default function Home() {
 
         <div className="legend">
           <div className="legendItem">
-            <span className="legendSwatch hall" />
-            Hall
+            <span className="legendSwatch hall" /> Hall
           </div>
           <div className="legendItem">
-            <span className="legendSwatch ks1" />
-            KS1 Playground
+            <span className="legendSwatch ks1" /> KS1 Playground
           </div>
           <div className="legendItem">
-            <span className="legendSwatch ks2" />
-            KS2 Playground
+            <span className="legendSwatch ks2" /> KS2 Playground
           </div>
           <div className="legendItem">
-            <span className="legendSwatch break" />
-            Break
+            <span className="legendSwatch break" /> Break
           </div>
         </div>
       </div>
@@ -214,7 +251,10 @@ export default function Home() {
           return (
             <section key={day} className="dayCard">
               <div className="dayHeader">
-                <h2>{day}</h2>
+                <div>
+                  <h2>{day}</h2>
+                  <div className="printMeta">Week commencing: {weekDisplay}</div>
+                </div>
                 <div className="dayMeta">
                   <span>Hall {dayPlan.hall.length}</span>
                   <span>KS1 {dayPlan.ks1.length}</span>
@@ -237,18 +277,10 @@ export default function Home() {
                     {TIME_ROWS.map((row) => (
                       <tr key={row.id}>
                         <td className="timeCell">{row.label}</td>
-                        <td className="hallCell">
-                          {getCellContent(dayPlan, row.id, "hall")}
-                        </td>
-                        <td className="ks1Cell">
-                          {getCellContent(dayPlan, row.id, "ks1")}
-                        </td>
-                        <td className="ks2Cell">
-                          {getCellContent(dayPlan, row.id, "ks2")}
-                        </td>
-                        <td className="breakCell">
-                          {getCellContent(dayPlan, row.id, "break")}
-                        </td>
+                        <td className="hallCell">{getCellContent(dayPlan, row.start, row.end, "hall")}</td>
+                        <td className="ks1Cell">{getCellContent(dayPlan, row.start, row.end, "ks1")}</td>
+                        <td className="ks2Cell">{getCellContent(dayPlan, row.start, row.end, "ks2")}</td>
+                        <td className="breakCell">{getCellContent(dayPlan, row.start, row.end, "break")}</td>
                       </tr>
                     ))}
                   </tbody>
@@ -256,8 +288,7 @@ export default function Home() {
               </div>
 
               <div className="footerNote">
-                <strong>Unassigned / spare staff:</strong>{" "}
-                {dayPlan.unassigned.length ? dayPlan.unassigned.join(", ") : "None"}
+                <strong>Spare / unassigned staff:</strong> {dayPlan.unassigned.length ? dayPlan.unassigned.join(", ") : "None"}
               </div>
             </section>
           );
@@ -268,8 +299,7 @@ export default function Home() {
         .page {
           min-height: 100vh;
           padding: 24px;
-          background:
-            radial-gradient(circle at top left, #f0f9ff 0%, #f8fafc 35%, #eef2ff 100%);
+          background: radial-gradient(circle at top left, #eef6ff 0%, #f8fafc 36%, #f5f3ff 100%);
           color: #0f172a;
           font-family: Arial, Helvetica, sans-serif;
         }
@@ -297,7 +327,7 @@ export default function Home() {
         .summaryCard,
         .toolbarCard,
         .dayCard {
-          background: rgba(255, 255, 255, 0.88);
+          background: rgba(255, 255, 255, 0.9);
           backdrop-filter: blur(8px);
           border: 1px solid rgba(148, 163, 184, 0.22);
           box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
@@ -332,16 +362,18 @@ export default function Home() {
           gap: 12px;
           flex-wrap: wrap;
           margin-bottom: 14px;
+          align-items: end;
         }
 
         .staffInput {
-          flex: 1 1 260px;
+          flex: 1 1 240px;
           min-width: 220px;
           padding: 12px 14px;
           border-radius: 12px;
           border: 1px solid #cbd5e1;
           font-size: 15px;
           outline: none;
+          background: white;
         }
 
         .staffInput:focus {
@@ -349,18 +381,38 @@ export default function Home() {
           box-shadow: 0 0 0 4px rgba(99, 102, 241, 0.14);
         }
 
-        .primaryButton {
-          border: 0;
-          border-radius: 12px;
-          padding: 12px 18px;
-          background: linear-gradient(135deg, #4f46e5, #7c3aed);
-          color: white;
-          font-weight: 700;
-          cursor: pointer;
+        .dateBlock {
+          display: flex;
+          flex-direction: column;
+          gap: 6px;
+          min-width: 220px;
         }
 
-        .primaryButton:hover {
-          opacity: 0.96;
+        .dateBlock label {
+          font-size: 14px;
+          font-weight: 700;
+          color: #334155;
+        }
+
+        .primaryButton,
+        .secondaryButton {
+          border-radius: 12px;
+          padding: 12px 18px;
+          font-weight: 700;
+          cursor: pointer;
+          white-space: nowrap;
+        }
+
+        .primaryButton {
+          border: 0;
+          background: linear-gradient(135deg, #4f46e5, #7c3aed);
+          color: white;
+        }
+
+        .secondaryButton {
+          border: 1px solid #cbd5e1;
+          background: white;
+          color: #0f172a;
         }
 
         .staffPills {
@@ -405,30 +457,26 @@ export default function Home() {
           display: inline-block;
         }
 
-        .legendSwatch.hall {
-          background: #dbeafe;
-        }
-
-        .legendSwatch.ks1 {
-          background: #ccfbf1;
-        }
-
-        .legendSwatch.ks2 {
-          background: #fef3c7;
-        }
-
-        .legendSwatch.break {
-          background: #ede9fe;
-        }
+        .legendSwatch.hall { background: #dbeafe; }
+        .legendSwatch.ks1 { background: #ccfbf1; }
+        .legendSwatch.ks2 { background: #fef3c7; }
+        .legendSwatch.break { background: #ede9fe; }
 
         .daysGrid {
           display: grid;
-          grid-template-columns: repeat(auto-fit, minmax(560px, 1fr));
+          grid-template-columns: 1fr;
           gap: 20px;
         }
 
         .dayCard {
           padding: 18px;
+          page-break-after: always;
+          break-after: page;
+        }
+
+        .dayCard:last-child {
+          page-break-after: auto;
+          break-after: auto;
         }
 
         .dayHeader {
@@ -443,6 +491,12 @@ export default function Home() {
         .dayHeader h2 {
           margin: 0;
           font-size: 22px;
+        }
+
+        .printMeta {
+          color: #64748b;
+          font-size: 14px;
+          margin-top: 4px;
         }
 
         .dayMeta {
@@ -479,12 +533,11 @@ export default function Home() {
           color: white;
           font-weight: 700;
           border-right: 1px solid rgba(255, 255, 255, 0.08);
+          position: sticky;
+          top: 0;
         }
 
-        .rotaTable th:first-child {
-          border-top-left-radius: 14px;
-        }
-
+        .rotaTable th:first-child { border-top-left-radius: 14px; }
         .rotaTable th:last-child {
           border-top-right-radius: 14px;
           border-right: 0;
@@ -492,7 +545,7 @@ export default function Home() {
 
         .rotaTable td {
           vertical-align: top;
-          padding: 10px;
+          padding: 8px;
           border-right: 1px solid #e2e8f0;
           border-bottom: 1px solid #e2e8f0;
         }
@@ -501,51 +554,38 @@ export default function Home() {
           border-left: 1px solid #e2e8f0;
         }
 
-        .timeCol {
-          width: 110px;
-        }
+        .timeCol { width: 110px; }
 
         .timeCell {
           background: #f8fafc;
           font-weight: 700;
           color: #334155;
           white-space: nowrap;
+          font-size: 12px;
         }
 
-        .hallCell {
-          background: #eff6ff;
-        }
-
-        .ks1Cell {
-          background: #f0fdfa;
-        }
-
-        .ks2Cell {
-          background: #fffbeb;
-        }
-
-        .breakCell {
-          background: #f5f3ff;
-        }
+        .hallCell { background: #eff6ff; }
+        .ks1Cell { background: #f0fdfa; }
+        .ks2Cell { background: #fffbeb; }
+        .breakCell { background: #f5f3ff; }
 
         .nameList {
           display: flex;
           flex-direction: column;
-          gap: 6px;
+          gap: 4px;
         }
 
         .nameChip {
-          background: rgba(255, 255, 255, 0.85);
+          background: rgba(255, 255, 255, 0.9);
           border: 1px solid rgba(148, 163, 184, 0.2);
           border-radius: 10px;
-          padding: 6px 8px;
+          padding: 5px 7px;
           font-weight: 600;
           color: #1e293b;
+          font-size: 12px;
         }
 
-        .emptyText {
-          color: #94a3b8;
-        }
+        .emptyText { color: #94a3b8; }
 
         .footerNote {
           margin-top: 14px;
@@ -554,16 +594,56 @@ export default function Home() {
         }
 
         @media (max-width: 700px) {
+          .page { padding: 14px; }
+          h1 { font-size: 26px; }
+        }
+
+        @media print {
+          .noPrint {
+            display: none !important;
+          }
+
           .page {
-            padding: 14px;
+            background: white !important;
+            padding: 0 !important;
           }
 
           .daysGrid {
-            grid-template-columns: 1fr;
+            display: block !important;
           }
 
-          h1 {
-            font-size: 26px;
+          .dayCard {
+            box-shadow: none !important;
+            border: none !important;
+            background: white !important;
+            margin: 0 0 20px 0;
+            padding: 0 !important;
+          }
+
+          .tableWrap {
+            overflow: visible !important;
+          }
+
+          .rotaTable {
+            min-width: 100% !important;
+            font-size: 11px;
+          }
+
+          .rotaTable th {
+            background: #e2e8f0 !important;
+            color: #0f172a !important;
+            position: static !important;
+          }
+
+          .nameChip {
+            border: 1px solid #cbd5e1 !important;
+            background: white !important;
+            font-size: 10px;
+            padding: 4px 6px;
+          }
+
+          .timeCell {
+            font-size: 10px;
           }
         }
       `}</style>
