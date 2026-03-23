@@ -7,10 +7,13 @@ type DayName = (typeof DAYS)[number];
 type DutyColumnKey = "hall" | "ks1" | "ks2";
 type ColumnKey = DutyColumnKey | "break";
 
+type BreakRule = "within-window" | "extend-30" | "fully-flexible";
+
 type StaffMember = {
   name: string;
   availableStart?: number;
   availableEnd?: number;
+  breakRule?: BreakRule;
 };
 
 type BreakWindow = { start: number; end: number } | null;
@@ -44,20 +47,20 @@ const SLOT_STEP = 5;
 const LUNCH_BREAK_SLOTS = 6; // 30 minutes
 
 const DEFAULT_STAFF: StaffMember[] = [
-  { name: "Paul", availableStart: 11 * 60 + 55, availableEnd: 12 * 60 + 45 },
-  { name: "Niki", availableStart: 11 * 60 + 55, availableEnd: 12 * 60 + 45 },
-  { name: "Sharon", availableStart: 12 * 60, availableEnd: 12 * 60 + 45 },
-  { name: "Bryan", availableStart: 12 * 60 + 15, availableEnd: 13 * 60 },
-  { name: "Drissia", availableStart: 12 * 60 + 15, availableEnd: 13 * 60 },
-  { name: "Rhea", availableStart: 12 * 60 + 15, availableEnd: 13 * 60 },
-  { name: "Jamie", availableStart: 12 * 60 + 15, availableEnd: 13 * 60 },
-  { name: "Hayley", availableStart: 12 * 60 + 15, availableEnd: 13 * 60 },
-  { name: "Holly", availableStart: 12 * 60 + 15, availableEnd: 13 * 60 },
-  { name: "Amy", availableStart: 12 * 60 + 15, availableEnd: 13 * 60 },
-  { name: "Caroline", availableStart: 12 * 60, availableEnd: 12 * 60 + 45 },
-  { name: "Naomi", availableStart: 12 * 60, availableEnd: 12 * 60 + 45 },
-  { name: "Hannah" },
-  { name: "Nick" },
+  { name: "Paul", availableStart: 11 * 60 + 55, availableEnd: 12 * 60 + 45, breakRule: "extend-30" },
+  { name: "Niki", availableStart: 11 * 60 + 55, availableEnd: 12 * 60 + 45, breakRule: "extend-30" },
+  { name: "Sharon", availableStart: 12 * 60, availableEnd: 12 * 60 + 45, breakRule: "extend-30" },
+  { name: "Bryan", availableStart: 12 * 60 + 15, availableEnd: 13 * 60, breakRule: "extend-30" },
+  { name: "Drissia", availableStart: 12 * 60 + 15, availableEnd: 13 * 60, breakRule: "extend-30" },
+  { name: "Rhea", availableStart: 12 * 60 + 15, availableEnd: 13 * 60, breakRule: "extend-30" },
+  { name: "Jamie", availableStart: 12 * 60 + 15, availableEnd: 13 * 60, breakRule: "extend-30" },
+  { name: "Hayley", availableStart: 12 * 60 + 15, availableEnd: 13 * 60, breakRule: "extend-30" },
+  { name: "Holly", availableStart: 12 * 60 + 15, availableEnd: 13 * 60, breakRule: "within-window" },
+  { name: "Amy", availableStart: 12 * 60 + 15, availableEnd: 13 * 60, breakRule: "within-window" },
+  { name: "Caroline", availableStart: 12 * 60, availableEnd: 12 * 60 + 45, breakRule: "extend-30" },
+  { name: "Naomi", availableStart: 12 * 60, availableEnd: 12 * 60 + 45, breakRule: "extend-30" },
+  { name: "Hannah", breakRule: "fully-flexible" },
+  { name: "Nick", breakRule: "fully-flexible" },
 ];
 
 function formatTime(totalMinutes: number) {
@@ -115,10 +118,21 @@ function buildInitialAbsenceState(): Record<DayName, string[]> {
 }
 
 function availabilityLabel(member: StaffMember) {
-  if (member.availableStart === undefined || member.availableEnd === undefined) {
-    return "Available all lunch";
-  }
-  return `${formatTime(member.availableStart)}–${formatTime(member.availableEnd)}`;
+  const timeLabel =
+    member.availableStart === undefined || member.availableEnd === undefined
+      ? "Available all lunch"
+      : `${formatTime(member.availableStart)}–${formatTime(member.availableEnd)}`;
+
+  const rule = member.breakRule ?? "within-window";
+
+  const ruleLabel =
+    rule === "extend-30"
+      ? " | break ±30 mins"
+      : rule === "fully-flexible"
+      ? " | break anytime"
+      : " | break in window";
+
+  return `${timeLabel}${ruleLabel}`;
 }
 
 function isStaffAvailableForSlot(member: StaffMember, rowStart: number, rowEnd: number) {
@@ -150,6 +164,34 @@ function dutyNeedForRow(rowStart: number, rowEnd: number) {
 
 function breakSignature(breakInfo: BreakAssignment) {
   return `L:${breakInfo.lunch.join("|")}__S:${breakInfo.spare.join("|")}`;
+}
+
+function getBreakWindow(member: StaffMember) {
+  const rule = member.breakRule ?? "within-window";
+
+  if (rule === "fully-flexible") {
+    return { start: SLOT_START, end: SLOT_END };
+  }
+
+  const baseStart = member.availableStart ?? SLOT_START;
+  const baseEnd = member.availableEnd ?? SLOT_END;
+
+  if (rule === "extend-30") {
+    return {
+      start: Math.max(SLOT_START, baseStart - 30),
+      end: Math.min(SLOT_END, baseEnd + 30),
+    };
+  }
+
+  return {
+    start: baseStart,
+    end: baseEnd,
+  };
+}
+
+function isStaffEligibleForBreakSlot(member: StaffMember, rowStart: number, rowEnd: number) {
+  const breakWindow = getBreakWindow(member);
+  return breakWindow.start <= rowStart && breakWindow.end >= rowEnd;
 }
 
 function buildSegments(rows: SlotAssignment[], column: ColumnKey): SegmentCell[] {
@@ -218,7 +260,7 @@ function assignLunchBreaks(members: StaffMember[]) {
       const windowStart = TIME_ROWS[startIndex].start;
       const windowEnd = TIME_ROWS[endIndex].end;
 
-      if (!isStaffAvailableForSlot(member, windowStart, windowEnd)) continue;
+      if (!isStaffEligibleForBreakSlot(member, windowStart, windowEnd)) continue;
 
       let feasible = true;
       let score = 0;
