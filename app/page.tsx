@@ -18,7 +18,7 @@ type StaffMember = {
 type BreakWindow = { start: number; end: number } | null;
 
 type BreakAssignment = {
-  lunch: string[];
+  lunch: { label: string; highlightRed: boolean }[];
   spare: string[];
 };
 
@@ -43,7 +43,7 @@ type SegmentCell = {
 const SLOT_START = 11 * 60 + 25;
 const SLOT_END = 13 * 60 + 30;
 const SLOT_STEP = 5;
-const LUNCH_BREAK_SLOTS = 6; // 30 minutes
+const LUNCH_BREAK_SLOTS = 6;
 
 const DEFAULT_STAFF: StaffMember[] = [
   { name: "Paul", availableStart: 11 * 60 + 55, availableEnd: 12 * 60 + 45, breakRule: "extend-30" },
@@ -166,6 +166,14 @@ function isStaffEligibleForBreakSlot(member: StaffMember, rowStart: number, rowE
   return breakWindow.start <= rowStart && breakWindow.end >= rowEnd;
 }
 
+function breakExtendsOutsideAvailability(member: StaffMember, lunchWindow: BreakWindow) {
+  if (!lunchWindow) return false;
+  if ((member.breakRule ?? "within-window") !== "extend-30") return false;
+  const availableStart = member.availableStart ?? SLOT_START;
+  const availableEnd = member.availableEnd ?? SLOT_END;
+  return lunchWindow.start < availableStart || lunchWindow.end > availableEnd;
+}
+
 function requiredCount(column: DutyColumnKey, rowStart: number, rowEnd: number) {
   const slotId = `${rowStart}-${rowEnd}`;
 
@@ -191,7 +199,10 @@ function dutyNeedForRow(rowStart: number, rowEnd: number) {
 }
 
 function breakSignature(breakInfo: BreakAssignment) {
-  return `L:${breakInfo.lunch.join("|")}__S:${breakInfo.spare.join("|")}`;
+  const lunchSig = breakInfo.lunch
+    .map((item) => `${item.label}:${item.highlightRed ? "1" : "0"}`)
+    .join("|");
+  return `L:${lunchSig}__S:${breakInfo.spare.join("|")}`;
 }
 
 function buildSegments(rows: SlotAssignment[], column: ColumnKey): SegmentCell[] {
@@ -236,7 +247,6 @@ function assignLunchBreaks(members: StaffMember[]) {
     members.map((m) => [m.name, null])
   );
 
-  // Track only lunches that take away someone who would otherwise be able to cover duty
   const dutyAvailableLunchesPerRow = Array(TIME_ROWS.length).fill(0);
 
   const sortedMembers = [...members].sort((a, b) => {
@@ -283,7 +293,6 @@ function assignLunchBreaks(members: StaffMember[]) {
 
           score += dutyAvailableLunchesPerRow[i] * 10 + Math.max(0, 3 - remainingCapacity);
         } else {
-          // Prefer breaks outside working availability where allowed
           score -= 5;
         }
       }
@@ -327,6 +336,8 @@ export default function Home() {
   const [absentByDay, setAbsentByDay] = useState<Record<DayName, string[]>>(
     buildInitialAbsenceState()
   );
+  const [showAvailabilityConfig, setShowAvailabilityConfig] = useState(false);
+  const [shuffleSeed, setShuffleSeed] = useState(0);
 
   const addStaff = () => {
     const trimmed = input.trim();
@@ -337,6 +348,10 @@ export default function Home() {
     }
     setStaff([...staff, { name: trimmed, breakRule: "within-window" }]);
     setInput("");
+  };
+
+  const reshuffle = () => {
+    setShuffleSeed((prev) => prev + 1);
   };
 
   const removeStaff = (name: string) => {
@@ -421,7 +436,7 @@ export default function Home() {
       );
 
       const rotationIndex = availableMembers.length
-        ? (dayIndex * 2) % availableMembers.length
+        ? (dayIndex * 2 + shuffleSeed) % availableMembers.length
         : 0;
 
       const rotatedNames = [
@@ -525,7 +540,7 @@ export default function Home() {
           }
         });
 
-        const lunch: string[] = [];
+        const lunch: { label: string; highlightRed: boolean }[] = [];
         const spare: string[] = [];
 
         availableMembers.forEach((member) => {
@@ -539,11 +554,12 @@ export default function Home() {
             slotAssignment.ks2.includes(member.name);
 
           if (onLunch && !onDuty) {
-            lunch.push(
-              `${member.name} (${formatTime(lunchWindow.start)}–${formatTime(
+            lunch.push({
+              label: `${member.name} (${formatTime(lunchWindow.start)}–${formatTime(
                 lunchWindow.end
-              )})`
-            );
+              )})`,
+              highlightRed: breakExtendsOutsideAvailability(member, lunchWindow),
+            });
           } else if (!onDuty && isStaffAvailableForSlot(member, row.start, row.end)) {
             spare.push(member.name);
           }
@@ -576,7 +592,7 @@ export default function Home() {
     });
 
     return result;
-  }, [staff, absentByDay]);
+  }, [staff, absentByDay, shuffleSeed]);
 
   const dayPlan = weekSchedule[selectedDay];
   const weekDisplay = formatDateForDisplay(weekCommencing);
@@ -602,6 +618,25 @@ export default function Home() {
     );
   }
 
+  function breakNames(
+    items: { label: string; highlightRed: boolean }[],
+    type: "lunch" | "spare"
+  ) {
+    if (!items.length) return <span className="emptyText">—</span>;
+    return (
+      <div className="nameList">
+        {items.map((item) => (
+          <div
+            key={`${type}-${item.label}`}
+            className={`nameChip ${item.highlightRed ? "nameChipRed" : ""}`}
+          >
+            {item.label}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
   function breakCellContent(breakInfo: BreakAssignment) {
     if (!breakInfo.lunch.length && !breakInfo.spare.length) {
       return <span className="emptyText">—</span>;
@@ -612,7 +647,7 @@ export default function Home() {
         {breakInfo.lunch.length ? (
           <div className="breakGroup">
             <div className="breakGroupTitle">On Lunch Break</div>
-            {cellNames(breakInfo.lunch)}
+            {breakNames(breakInfo.lunch, "lunch")}
           </div>
         ) : null}
         {breakInfo.spare.length ? (
@@ -632,7 +667,8 @@ export default function Home() {
           <h1>School Lunch & Playtime Rota</h1>
           <p>
             Lunch breaks are allocated first, then duties are built around them.
-            Break rules can be configured per person.
+            Break rules can be configured per person, and you can reshuffle duties
+            to get a different valid arrangement.
           </p>
         </div>
         <div className="summaryCard">
@@ -667,6 +703,9 @@ export default function Home() {
           <button onClick={addStaff} className="primaryButton">
             Add staff
           </button>
+          <button onClick={reshuffle} className="secondaryButton">
+            Reshuffle
+          </button>
           <button onClick={() => window.print()} className="secondaryButton">
             Print / Save PDF
           </button>
@@ -690,95 +729,111 @@ export default function Home() {
           <div className="legendItem"><span className="legendSwatch ks2" /> KS2 Playground</div>
           <div className="legendItem"><span className="legendSwatch break" /> Break / spare</div>
           <div className="legendItem"><span className="legendSwatch absent" /> Absent for selected day</div>
+          <div className="legendItem"><span className="legendSwatch redFlag" /> Break outside work window</div>
         </div>
       </div>
 
       <div className="configCard noPrint">
-        <div className="configHeader">
-          <h3>Staff availability windows</h3>
-          <p>The planner stays clean, but the engine still respects these timings and break rules.</p>
-        </div>
-        <div className="configTableWrap">
-          <table className="configTable">
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Available from</th>
-                <th>Available until</th>
-                <th>Break rule</th>
-                <th>Summary</th>
-                <th></th>
-              </tr>
-            </thead>
-            <tbody>
-              {staff.map((member) => (
-                <tr key={member.name}>
-                  <td>{member.name}</td>
-                  <td>
-                    <select
-                      value={member.availableStart ?? "all"}
-                      onChange={(e) =>
-                        updateStaffWindow(member.name, "availableStart", e.target.value)
-                      }
-                      className="configSelect"
-                    >
-                      <option value="all">All lunch</option>
-                      {TIME_OPTIONS.map((value) => (
-                        <option key={`start-${member.name}-${value}`} value={value}>
-                          {formatTime(value)}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                  <td>
-                    <select
-                      value={member.availableEnd ?? "all"}
-                      onChange={(e) =>
-                        updateStaffWindow(member.name, "availableEnd", e.target.value)
-                      }
-                      className="configSelect"
-                    >
-                      <option value="all">All lunch</option>
-                      {TIME_OPTIONS.map((value) => (
-                        <option key={`end-${member.name}-${value}`} value={value}>
-                          {formatTime(value)}
-                        </option>
-                      ))}
-                    </select>
-                  </td>
-                  <td>
-                    <select
-                      value={member.breakRule ?? "within-window"}
-                      onChange={(e) =>
-                        updateBreakRule(member.name, e.target.value as BreakRule)
-                      }
-                      className="configSelect"
-                    >
-                      <option value="within-window">Within availability</option>
-                      <option value="extend-30">±30 mins around availability</option>
-                      <option value="fully-flexible">Any time</option>
-                    </select>
-                  </td>
-                  <td>{availabilityLabel(member)}</td>
-                  <td>
-                    <button
-                      onClick={() => clearStaffWindow(member.name)}
-                      className="miniButton"
-                    >
-                      Clear
-                    </button>
-                    <button
-                      onClick={() => removeStaff(member.name)}
-                      className="miniButton danger"
-                    >
-                      Remove
-                    </button>
-                  </td>
+        <button
+          type="button"
+          className="configToggle"
+          onClick={() => setShowAvailabilityConfig((prev) => !prev)}
+          aria-expanded={showAvailabilityConfig}
+        >
+          <div>
+            <h3>Staff availability windows</h3>
+            <p>
+              The planner stays clean, but the engine still respects these timings and break rules.
+            </p>
+          </div>
+          <span className="configToggleIcon">
+            {showAvailabilityConfig ? "−" : "+"}
+          </span>
+        </button>
+
+        {showAvailabilityConfig ? (
+          <div className="configTableWrap">
+            <table className="configTable">
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Available from</th>
+                  <th>Available until</th>
+                  <th>Break rule</th>
+                  <th>Summary</th>
+                  <th></th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {staff.map((member) => (
+                  <tr key={member.name}>
+                    <td>{member.name}</td>
+                    <td>
+                      <select
+                        value={member.availableStart ?? "all"}
+                        onChange={(e) =>
+                          updateStaffWindow(member.name, "availableStart", e.target.value)
+                        }
+                        className="configSelect"
+                      >
+                        <option value="all">All lunch</option>
+                        {TIME_OPTIONS.map((value) => (
+                          <option key={`start-${member.name}-${value}`} value={value}>
+                            {formatTime(value)}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      <select
+                        value={member.availableEnd ?? "all"}
+                        onChange={(e) =>
+                          updateStaffWindow(member.name, "availableEnd", e.target.value)
+                        }
+                        className="configSelect"
+                      >
+                        <option value="all">All lunch</option>
+                        {TIME_OPTIONS.map((value) => (
+                          <option key={`end-${member.name}-${value}`} value={value}>
+                            {formatTime(value)}
+                          </option>
+                        ))}
+                      </select>
+                    </td>
+                    <td>
+                      <select
+                        value={member.breakRule ?? "within-window"}
+                        onChange={(e) =>
+                          updateBreakRule(member.name, e.target.value as BreakRule)
+                        }
+                        className="configSelect"
+                      >
+                        <option value="within-window">Within availability</option>
+                        <option value="extend-30">±30 mins around availability</option>
+                        <option value="fully-flexible">Any time</option>
+                      </select>
+                    </td>
+                    <td>{availabilityLabel(member)}</td>
+                    <td>
+                      <button
+                        onClick={() => clearStaffWindow(member.name)}
+                        className="miniButton"
+                      >
+                        Clear
+                      </button>
+                      <button
+                        onClick={() => removeStaff(member.name)}
+                        className="miniButton danger"
+                      >
+                        Remove
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        ) : null}
       </div>
 
       <section className="dayCard">
@@ -898,10 +953,15 @@ export default function Home() {
         .legendSwatch.ks2 { background: #fef3c7; }
         .legendSwatch.break { background: #ede9fe; }
         .legendSwatch.absent { background: #fee2e2; }
+        .legendSwatch.redFlag { background: #dc2626; }
+        .configToggle { width: 100%; border: 0; background: transparent; padding: 0; cursor: pointer; display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; text-align: left; }
+        .configToggle h3 { margin: 0 0 6px; font-size: 16px; }
+        .configToggle p { margin: 0; color: #64748b; font-size: 14px; }
+        .configToggleIcon { flex-shrink: 0; width: 32px; height: 32px; border-radius: 999px; background: #eef2ff; color: #4338ca; display: flex; align-items: center; justify-content: center; font-size: 22px; font-weight: 700; line-height: 1; }
         .configHeader { margin-bottom: 12px; }
         .configHeader h3, .absenceHeader h3 { margin: 0 0 6px; font-size: 16px; }
         .configTableWrap, .tableWrap { overflow-x: auto; }
-        .configTable { width: 100%; border-collapse: collapse; min-width: 1050px; }
+        .configTable { width: 100%; border-collapse: collapse; min-width: 1050px; margin-top: 16px; }
         .configTable th, .configTable td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #e2e8f0; font-size: 14px; }
         .dayCard { padding: 18px; page-break-after: always; break-after: page; }
         .dayHeader { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
@@ -931,9 +991,10 @@ export default function Home() {
         .breakCell { background: #f5f3ff; }
         .nameList { display: flex; flex-direction: column; gap: 4px; }
         .nameChip { background: rgba(255,255,255,0.92); border: 1px solid rgba(148,163,184,0.2); border-radius: 10px; padding: 5px 7px; color: #1e293b; font-weight: 700; }
+        .nameChipRed { color: #b91c1c; border-color: #fecaca; background: #fff1f2; }
         .breakGroups { display: flex; flex-direction: column; gap: 10px; }
         .breakGroup { display: flex; flex-direction: column; gap: 4px; }
-        .breakGroupTitle { font-size: 12px; font-weight: 800; color: #4c1d95; text-transform: uppercase; letter-spacing: 0.03em; }
+        .breakGroupTitle { font-size: 12px; font-weight: 900; color: #4c1d95; text-transform: uppercase; letter-spacing: 0.03em; }
         .emptyText { color: #94a3b8; }
         .footerNote { margin-top: 14px; font-size: 14px; color: #475569; }
         @media (max-width: 700px) { .page { padding: 14px; } h1 { font-size: 26px; } }
