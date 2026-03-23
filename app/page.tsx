@@ -6,7 +6,6 @@ const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"] as const;
 type DayName = (typeof DAYS)[number];
 type DutyColumnKey = "hall" | "ks1" | "ks2";
 type ColumnKey = DutyColumnKey | "break";
-
 type BreakRule = "within-window" | "extend-30" | "fully-flexible";
 
 type StaffMember = {
@@ -117,53 +116,26 @@ function buildInitialAbsenceState(): Record<DayName, string[]> {
   };
 }
 
+function breakRuleLabel(rule?: BreakRule) {
+  const actualRule = rule ?? "within-window";
+  if (actualRule === "extend-30") return "break ±30 mins";
+  if (actualRule === "fully-flexible") return "break anytime";
+  return "break in window";
+}
+
 function availabilityLabel(member: StaffMember) {
   const timeLabel =
     member.availableStart === undefined || member.availableEnd === undefined
       ? "Available all lunch"
       : `${formatTime(member.availableStart)}–${formatTime(member.availableEnd)}`;
 
-  const rule = member.breakRule ?? "within-window";
-
-  const ruleLabel =
-    rule === "extend-30"
-      ? " | break ±30 mins"
-      : rule === "fully-flexible"
-      ? " | break anytime"
-      : " | break in window";
-
-  return `${timeLabel}${ruleLabel}`;
+  return `${timeLabel} | ${breakRuleLabel(member.breakRule)}`;
 }
 
 function isStaffAvailableForSlot(member: StaffMember, rowStart: number, rowEnd: number) {
   const startOk = member.availableStart === undefined || member.availableStart <= rowStart;
   const endOk = member.availableEnd === undefined || member.availableEnd >= rowEnd;
   return startOk && endOk;
-}
-
-function requiredCount(column: DutyColumnKey, rowStart: number, rowEnd: number) {
-  const slotId = `${rowStart}-${rowEnd}`;
-  if (column === "hall") {
-    if (slotId === `${11 * 60 + 55}-${12 * 60}`) return 2;
-    if (rowStart >= 12 * 60 && rowEnd <= 12 * 60 + 45) return 3;
-    return 0;
-  }
-  if (column === "ks1") {
-    return rowStart >= 12 * 60 + 10 && rowEnd <= 13 * 60 ? 4 : 0;
-  }
-  return rowStart >= 12 * 60 + 15 && rowEnd <= 13 * 60 ? 3 : 0;
-}
-
-function dutyNeedForRow(rowStart: number, rowEnd: number) {
-  return (
-    requiredCount("hall", rowStart, rowEnd) +
-    requiredCount("ks1", rowStart, rowEnd) +
-    requiredCount("ks2", rowStart, rowEnd)
-  );
-}
-
-function breakSignature(breakInfo: BreakAssignment) {
-  return `L:${breakInfo.lunch.join("|")}__S:${breakInfo.spare.join("|")}`;
 }
 
 function getBreakWindow(member: StaffMember) {
@@ -192,6 +164,34 @@ function getBreakWindow(member: StaffMember) {
 function isStaffEligibleForBreakSlot(member: StaffMember, rowStart: number, rowEnd: number) {
   const breakWindow = getBreakWindow(member);
   return breakWindow.start <= rowStart && breakWindow.end >= rowEnd;
+}
+
+function requiredCount(column: DutyColumnKey, rowStart: number, rowEnd: number) {
+  const slotId = `${rowStart}-${rowEnd}`;
+
+  if (column === "hall") {
+    if (slotId === `${11 * 60 + 55}-${12 * 60}`) return 2;
+    if (rowStart >= 12 * 60 && rowEnd <= 12 * 60 + 45) return 3;
+    return 0;
+  }
+
+  if (column === "ks1") {
+    return rowStart >= 12 * 60 + 10 && rowEnd <= 13 * 60 ? 4 : 0;
+  }
+
+  return rowStart >= 12 * 60 + 15 && rowEnd <= 13 * 60 ? 3 : 0;
+}
+
+function dutyNeedForRow(rowStart: number, rowEnd: number) {
+  return (
+    requiredCount("hall", rowStart, rowEnd) +
+    requiredCount("ks1", rowStart, rowEnd) +
+    requiredCount("ks2", rowStart, rowEnd)
+  );
+}
+
+function breakSignature(breakInfo: BreakAssignment) {
+  return `L:${breakInfo.lunch.join("|")}__S:${breakInfo.spare.join("|")}`;
 }
 
 function buildSegments(rows: SlotAssignment[], column: ColumnKey): SegmentCell[] {
@@ -232,23 +232,19 @@ function timeOptions() {
 const TIME_OPTIONS = timeOptions();
 
 function assignLunchBreaks(members: StaffMember[]) {
-  const breaksPerRow = Array(TIME_ROWS.length).fill(0);
-
-  const rowCapacity = TIME_ROWS.map((row) => {
-    const availableCount = members.filter((member) =>
-      isStaffAvailableForSlot(member, row.start, row.end)
-    ).length;
-    return Math.max(0, availableCount - dutyNeedForRow(row.start, row.end));
-  });
-
   const lunchBreaks: Record<string, BreakWindow> = Object.fromEntries(
     members.map((m) => [m.name, null])
   );
 
+  // Track only lunches that take away someone who would otherwise be able to cover duty
+  const dutyAvailableLunchesPerRow = Array(TIME_ROWS.length).fill(0);
+
   const sortedMembers = [...members].sort((a, b) => {
-    const aWindow = (a.availableEnd ?? SLOT_END) - (a.availableStart ?? SLOT_START);
-    const bWindow = (b.availableEnd ?? SLOT_END) - (b.availableStart ?? SLOT_START);
-    if (aWindow !== bWindow) return aWindow - bWindow;
+    const aBreakWindow = getBreakWindow(a);
+    const bBreakWindow = getBreakWindow(b);
+    const aWidth = aBreakWindow.end - aBreakWindow.start;
+    const bWidth = bBreakWindow.end - bBreakWindow.start;
+    if (aWidth !== bWidth) return aWidth - bWidth;
     return a.name.localeCompare(b.name);
   });
 
@@ -266,11 +262,30 @@ function assignLunchBreaks(members: StaffMember[]) {
       let score = 0;
 
       for (let i = startIndex; i <= endIndex; i += 1) {
-        if (breaksPerRow[i] >= rowCapacity[i]) {
-          feasible = false;
-          break;
+        const row = TIME_ROWS[i];
+        const dutyNeed = dutyNeedForRow(row.start, row.end);
+        const dutyAvailableCount = members.filter((m) =>
+          isStaffAvailableForSlot(m, row.start, row.end)
+        ).length;
+
+        const memberWouldReduceCover = isStaffAvailableForSlot(member, row.start, row.end);
+
+        if (memberWouldReduceCover) {
+          const remainingCapacity = dutyAvailableCount - dutyNeed;
+          if (remainingCapacity <= 0) {
+            feasible = false;
+            break;
+          }
+          if (dutyAvailableLunchesPerRow[i] >= remainingCapacity) {
+            feasible = false;
+            break;
+          }
+
+          score += dutyAvailableLunchesPerRow[i] * 10 + Math.max(0, 3 - remainingCapacity);
+        } else {
+          // Prefer breaks outside working availability where allowed
+          score -= 5;
         }
-        score += breaksPerRow[i] * 10 + Math.max(0, 3 - rowCapacity[i]);
       }
 
       if (feasible) {
@@ -289,7 +304,10 @@ function assignLunchBreaks(members: StaffMember[]) {
     const chosenEnd = chosenStart + LUNCH_BREAK_SLOTS - 1;
 
     for (let i = chosenStart; i <= chosenEnd; i += 1) {
-      breaksPerRow[i] += 1;
+      const row = TIME_ROWS[i];
+      if (isStaffAvailableForSlot(member, row.start, row.end)) {
+        dutyAvailableLunchesPerRow[i] += 1;
+      }
     }
 
     lunchBreaks[member.name] = {
@@ -317,7 +335,7 @@ export default function Home() {
       setInput("");
       return;
     }
-    setStaff([...staff, { name: trimmed }]);
+    setStaff([...staff, { name: trimmed, breakRule: "within-window" }]);
     setInput("");
   };
 
@@ -355,6 +373,14 @@ export default function Home() {
     );
   };
 
+  const updateBreakRule = (name: string, value: BreakRule) => {
+    setStaff((prev) =>
+      prev.map((member) =>
+        member.name === name ? { ...member, breakRule: value } : member
+      )
+    );
+  };
+
   const clearStaffWindow = (name: string) => {
     setStaff((prev) =>
       prev.map((member) =>
@@ -386,16 +412,23 @@ export default function Home() {
       const lunchBreaks = assignLunchBreaks(availableMembers);
 
       const rows: SlotAssignment[] = [];
-      const loadCount = Object.fromEntries(availableMembers.map((member) => [member.name, 0]));
+      const loadCount = Object.fromEntries(
+        availableMembers.map((member) => [member.name, 0])
+      );
+
       let previousLocation = Object.fromEntries(
         availableMembers.map((member) => [member.name, null as ColumnKey | null])
       );
 
-      const rotationIndex = availableMembers.length ? (dayIndex * 2) % availableMembers.length : 0;
+      const rotationIndex = availableMembers.length
+        ? (dayIndex * 2) % availableMembers.length
+        : 0;
+
       const rotatedNames = [
         ...availableMembers.slice(rotationIndex).map((member) => member.name),
         ...availableMembers.slice(0, rotationIndex).map((member) => member.name),
       ];
+
       const orderIndex = Object.fromEntries(
         rotatedNames.map((name, index) => [name, index])
       );
@@ -425,6 +458,7 @@ export default function Home() {
                 const lunch = lunchBreaks[name];
                 const onLunch =
                   !!lunch && row.start >= lunch.start && row.end <= lunch.end;
+
                 return (
                   !!member &&
                   !onLunch &&
@@ -498,6 +532,7 @@ export default function Home() {
           const lunchWindow = lunchBreaks[member.name];
           const onLunch =
             !!lunchWindow && row.start >= lunchWindow.start && row.end <= lunchWindow.end;
+
           const onDuty =
             slotAssignment.hall.includes(member.name) ||
             slotAssignment.ks1.includes(member.name) ||
@@ -532,9 +567,9 @@ export default function Home() {
         .map((member) => member.name);
 
       if (!warning && noLunchNames.length) {
-        warning = `Unable to place a full 30-minute lunch break for: ${noLunchNames.join(", ")}.`;
+        warning = `No valid 30-minute protected lunch break could be placed for: ${noLunchNames.join(", ")}.`;
       } else if (warning && noLunchNames.length) {
-        warning += ` Unable to place a full 30-minute lunch break for: ${noLunchNames.join(", ")}.`;
+        warning += ` No valid 30-minute protected lunch break could be placed for: ${noLunchNames.join(", ")}.`;
       }
 
       result[day] = { rows, absent, warning, lunchBreaks };
@@ -576,7 +611,7 @@ export default function Home() {
       <div className="breakGroups">
         {breakInfo.lunch.length ? (
           <div className="breakGroup">
-            <div className="breakGroupTitle">On lunch break</div>
+            <div className="breakGroupTitle">On Lunch Break</div>
             {cellNames(breakInfo.lunch)}
           </div>
         ) : null}
@@ -596,8 +631,8 @@ export default function Home() {
         <div>
           <h1>School Lunch & Playtime Rota</h1>
           <p>
-            Lunch breaks are now allocated first, then duties are built around them
-            so every possible 30-minute lunch break is protected before cover is assigned.
+            Lunch breaks are allocated first, then duties are built around them.
+            Break rules can be configured per person.
           </p>
         </div>
         <div className="summaryCard">
@@ -661,10 +696,7 @@ export default function Home() {
       <div className="configCard noPrint">
         <div className="configHeader">
           <h3>Staff availability windows</h3>
-          <p>
-            The planner stays clean, but the engine still respects these timings for
-            cover and lunch break allocation.
-          </p>
+          <p>The planner stays clean, but the engine still respects these timings and break rules.</p>
         </div>
         <div className="configTableWrap">
           <table className="configTable">
@@ -673,6 +705,7 @@ export default function Home() {
                 <th>Name</th>
                 <th>Available from</th>
                 <th>Available until</th>
+                <th>Break rule</th>
                 <th>Summary</th>
                 <th></th>
               </tr>
@@ -711,6 +744,19 @@ export default function Home() {
                           {formatTime(value)}
                         </option>
                       ))}
+                    </select>
+                  </td>
+                  <td>
+                    <select
+                      value={member.breakRule ?? "within-window"}
+                      onChange={(e) =>
+                        updateBreakRule(member.name, e.target.value as BreakRule)
+                      }
+                      className="configSelect"
+                    >
+                      <option value="within-window">Within availability</option>
+                      <option value="extend-30">±30 mins around availability</option>
+                      <option value="fully-flexible">Any time</option>
                     </select>
                   </td>
                   <td>{availabilityLabel(member)}</td>
@@ -855,7 +901,7 @@ export default function Home() {
         .configHeader { margin-bottom: 12px; }
         .configHeader h3, .absenceHeader h3 { margin: 0 0 6px; font-size: 16px; }
         .configTableWrap, .tableWrap { overflow-x: auto; }
-        .configTable { width: 100%; border-collapse: collapse; min-width: 900px; }
+        .configTable { width: 100%; border-collapse: collapse; min-width: 1050px; }
         .configTable th, .configTable td { text-align: left; padding: 10px 12px; border-bottom: 1px solid #e2e8f0; font-size: 14px; }
         .dayCard { padding: 18px; page-break-after: always; break-after: page; }
         .dayHeader { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; margin-bottom: 14px; flex-wrap: wrap; }
@@ -887,7 +933,7 @@ export default function Home() {
         .nameChip { background: rgba(255,255,255,0.92); border: 1px solid rgba(148,163,184,0.2); border-radius: 10px; padding: 5px 7px; color: #1e293b; font-weight: 700; }
         .breakGroups { display: flex; flex-direction: column; gap: 10px; }
         .breakGroup { display: flex; flex-direction: column; gap: 4px; }
-        .breakGroupTitle { font-size: 12px; font-weight: 700; color: #6d28d9; text-transform: uppercase; letter-spacing: 0.03em; }
+        .breakGroupTitle { font-size: 12px; font-weight: 800; color: #4c1d95; text-transform: uppercase; letter-spacing: 0.03em; }
         .emptyText { color: #94a3b8; }
         .footerNote { margin-top: 14px; font-size: 14px; color: #475569; }
         @media (max-width: 700px) { .page { padding: 14px; } h1 { font-size: 26px; } }
